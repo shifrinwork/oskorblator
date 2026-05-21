@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --fire-red: #dc2626;
+  --fire-orange: #f97316;
+  --fire-yellow: #fbbf24;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background-color: #080808;
+  color: #f1f5f9;
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  min-height: 100vh;
+}
+
+/* Fire text effect */
+.fire-text {
+  background: linear-gradient(180deg, #fbbf24 0%, #f97316 40%, #dc2626 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Glowing border */
+.glow-border {
+  box-shadow: 0 0 0 1px #f97316, 0 0 15px rgba(249, 115, 22, 0.3);
+}
+
+.glow-border-red {
+  box-shadow: 0 0 0 1px #dc2626, 0 0 15px rgba(220, 38, 38, 0.3);
+}
+
+/* Score bar */
+.score-bar-fill {
+  background: linear-gradient(90deg, #dc2626, #f97316, #fbbf24);
+  box-shadow: 0 0 10px rgba(249, 115, 22, 0.5);
+}
+
+/* Game card */
+.game-card {
+  background: linear-gradient(135deg, #0f0f0f 0%, #1a0a0a 100%);
+  border: 1px solid #1e1e1e;
+}
+
+.game-card:hover {
+  border-color: #f97316;
+  box-shadow: 0 0 20px rgba(249, 115, 22, 0.15);
+}
+
+/* Insult textarea */
+.insult-textarea {
+  background: #0a0a0a;
+  border: 2px solid #1e1e1e;
+  color: #f1f5f9;
+  font-size: 1.1rem;
+  resize: none;
+  transition: border-color 0.2s;
+}
+
+.insult-textarea:focus {
+  outline: none;
+  border-color: #f97316;
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.2);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0a0a;
+}
+::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #f97316;
+}
+
+/* Timer warning */
+.timer-warning {
+  animation: pulse 0.8s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
