@@ -53,7 +53,6 @@ function RegisterForm() {
   const [step, setStep] = useState<"disclaimer" | "form">("disclaimer");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [email, setEmail] = useState("");
   const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -108,21 +107,15 @@ function RegisterForm() {
         return;
       }
 
-      // Email для Supabase Auth
-      // Если не указан — генерируем технический (только ASCII в local-части!)
+      // Supabase Auth требует email — генерируем технический (только ASCII)
       const rand = Math.random().toString(36).slice(2, 8);
-      const authEmail = email.trim()
-        ? email.trim()
-        : `${toAsciiSlug(cleanUsername)}.${rand}@players.oskorblator.app`;
+      const authEmail = `${toAsciiSlug(cleanUsername)}.${rand}@players.oskorblator.app`;
 
       const { data: authData, error: signUpError } = await supabase.auth.signUp({
         email: authEmail,
         password,
         options: {
-          data: {
-            username: cleanUsername,
-            has_real_email: !!email.trim(),
-          },
+          data: { username: cleanUsername },
         },
       });
 
@@ -287,28 +280,6 @@ function RegisterForm() {
             >
               {loading ? "Создаём аккаунт..." : "Вступить в битву 🔥"}
             </button>
-
-            {/* Email — необязательный, внизу */}
-            <div className="pt-2 border-t border-[#1e1e1e]">
-              <label className="block text-sm text-slate-600 mb-1.5">
-                Email{" "}
-                <span className="text-xs text-slate-700">
-                  — не обязателен, только для восстановления пароля
-                </span>
-              </label>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="твой@email.ru (необязательно)"
-                className="w-full px-3 py-2.5 rounded-lg bg-[#0a0a0a] border border-[#2e2e2e] focus:border-slate-500 focus:outline-none text-slate-400 text-sm transition-colors placeholder:text-slate-700"
-              />
-              {!email && (
-                <p className="text-xs text-slate-700 mt-1">
-                  ⚠️ Без email восстановить пароль будет невозможно
-                </p>
-              )}
-            </div>
 
           </form>
 
