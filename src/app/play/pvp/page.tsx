@@ -4,32 +4,88 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase";
-import { scoreInsult } from "@/lib/scoring";
-import { WIN_POINTS, LOSS_POINTS } from "@/lib/ranks";
+import { scoreInsult, getBotInsult } from "@/lib/scoring";
+import { WIN_POINTS, LOSS_POINTS, getRankForRating } from "@/lib/ranks";
+import { checkAndUpdateAchievements } from "@/lib/achievements";
 import Timer from "@/components/Timer";
 import Navbar from "@/components/Navbar";
 import type { Profile, Game } from "@/lib/supabase";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
+// ── Ghost-opponent helpers ────────────────────────────────────
+const G_ADJ = [
+  "Кровавый","Злобный","Бешеный","Ядовитый","Дикий","Тёмный","Безумный",
+  "Лютый","Страшный","Грозный","Матёрый","Шальной","Яростный","Коварный",
+  "Лихой","Свирепый","Буйный","Дерзкий","Зверский","Бешеный",
+];
+const G_NAMES = [
+  "Вася","Петя","Колян","Серёга","Дима","Антоха","Сашок","Миша",
+  "Женька","Ромка","Витёк","Пашок","Лёха","Толян","Борян","Костян",
+  "Тёма","Артёмка","Гришка","Вовик",
+];
+const G_SFX = ["666","228","_pro","","_real","_pvp","2077","_gg","_og","322"];
+
+function ghostNick() {
+  const r = <T,>(a: T[]) => a[Math.floor(Math.random() * a.length)];
+  return r(G_ADJ) + r(G_NAMES) + r(G_SFX);
+}
+
+function ghostRating(my: number) {
+  // ±200 of real rating, minimum 0
+  return Math.max(0, my + Math.floor(Math.random() * 400) - 200);
+}
+
+function ghostScore(rating: number): number {
+  // Score range by rank bracket:
+  // lowest rank: 10+, highest rank: 80+
+  const bands: [number, number, number, number][] = [
+    [0,    200,  10, 24],
+    [200,  400,  20, 34],
+    [400,  650,  30, 49],
+    [650,  1000, 45, 64],
+    [1000, 1400, 55, 74],
+    [1400, 1900, 65, 79],
+    [1900, 2500, 70, 89],
+    [2500, Infinity, 80, 99],
+  ];
+  const [,, lo, hi] = bands.find(([a, b]) => rating >= a && rating < b) ?? bands[0];
+  return lo + Math.floor(Math.random() * (hi - lo + 1));
+}
+
+// ─────────────────────────────────────────────────────────────
+
 type Phase = "lobby" | "searching" | "fighting" | "result";
 
 export default function PvPPage() {
-  const [phase, setPhase] = useState<Phase>("lobby");
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [opponent, setOpponent] = useState<Profile | null>(null);
-  const [game, setGame] = useState<Game | null>(null);
-  const [insult, setInsult] = useState("");
-  const [timerRunning, setTimerRunning] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
-  const [ratingChange, setRatingChange] = useState(0);
+  const [phase, setPhase]                 = useState<Phase>("lobby");
+  const [profile, setProfile]             = useState<Profile | null>(null);
+  const [opponent, setOpponent]           = useState<Profile | null>(null);
+  const [game, setGame]                   = useState<Game | null>(null);
+  const [insult, setInsult]               = useState("");
+  const [timerRunning, setTimerRunning]   = useState(false);
+  const [submitted, setSubmitted]         = useState(false);
+  const [ratingChange, setRatingChange]   = useState(0);
+  const [isGhostMatch, setIsGhostMatch]   = useState(false);
+  const [newAchievements, setNewAchievements] = useState<string[]>([]);
+  // searching countdown (counts UP for UX — doesn't reveal timeout)
+  const [searchSecs, setSearchSecs]       = useState(0);
+  // brief "Соперник найден!" flash before fighting
+  const [matchFoundFlash, setMatchFoundFlash] = useState(false);
 
-  const profileRef = useRef<Profile | null>(null);
-  const gameFoundRef = useRef(false);
-  const gameRef = useRef<Game | null>(null);
-  const submittedRef = useRef(false);
-  const insultRef = useRef("");
-  const matchChanRef = useRef<RealtimeChannel | null>(null);
-  const gameChanRef = useRef<RealtimeChannel | null>(null);
+  // ── Refs (safe to use in closures / realtime callbacks) ──
+  const profileRef    = useRef<Profile | null>(null);
+  const gameFoundRef  = useRef(false);
+  const gameRef       = useRef<Game | null>(null);
+  const submittedRef  = useRef(false);
+  const insultRef     = useRef("");
+  const matchChanRef  = useRef<RealtimeChannel | null>(null);
+  const gameChanRef   = useRef<RealtimeChannel | null>(null);
+  const ghostTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const resolveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const countdownRef  = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isGhostRef    = useRef(false);
+  const ghostScoreRef = useRef(0);
+  const ghostInsultRef = useRef("");
 
   const router = useRouter();
   const supabase = createClient();
@@ -39,21 +95,126 @@ export default function PvPPage() {
   useEffect(() => { submittedRef.current = submitted; }, [submitted]);
   useEffect(() => { insultRef.current = insult; }, [insult]);
 
+  // Cleanup on unmount
   useEffect(() => {
     supabase.auth.getUser().then(({ data: { user } }) => {
       if (!user) { router.push("/login"); return; }
       supabase.from("profiles").select("*").eq("id", user.id).single()
         .then(({ data }) => { setProfile(data); profileRef.current = data; });
     });
-    const matchChan = matchChanRef.current;
-    const gameChan = gameChanRef.current;
     return () => {
-      matchChan?.unsubscribe();
-      gameChan?.unsubscribe();
+      matchChanRef.current?.unsubscribe();
+      gameChanRef.current?.unsubscribe();
+      if (ghostTimerRef.current) clearTimeout(ghostTimerRef.current);
+      if (resolveTimerRef.current) clearTimeout(resolveTimerRef.current);
+      if (countdownRef.current) clearInterval(countdownRef.current);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── Ghost fight: resolve ──────────────────────────────────
+  const resolveGhostFight = useCallback(async (playerInsult: string) => {
+    const me = profileRef.current;
+    if (!me) return;
+
+    const playerScore = scoreInsult(playerInsult);
+    const botScore    = ghostScoreRef.current;
+    const botInsult   = ghostInsultRef.current;
+    const won         = playerScore > botScore;
+    const draw        = playerScore === botScore;
+
+    const delta = won ? WIN_POINTS : draw ? 0 : LOSS_POINTS;
+    setRatingChange(delta);
+
+    // Build a fake game object for the result UI
+    const fakeGame = {
+      id: "ghost-" + Date.now(),
+      player1_id: me.id,
+      player2_id: "ghost",
+      player1_insult: playerInsult,
+      player2_insult: botInsult,
+      player1_score: playerScore,
+      player2_score: botScore,
+      winner_id: won ? me.id : !draw ? "ghost" : null,
+      status: "finished",
+    } as unknown as Game;
+
+    setGame(fakeGame);
+    gameRef.current = fakeGame;
+    setPhase("result");
+
+    // ── DB updates ──
+    await supabase.rpc("update_streak", { uid: me.id });
+
+    if (won) {
+      await supabase.rpc("increment_rating", { uid: me.id, delta: WIN_POINTS });
+      await supabase.rpc("increment_wins",   { uid: me.id });
+      await supabase.rpc("increment_pvp_wins", { uid: me.id });
+    } else if (!draw) {
+      await supabase.rpc("increment_rating", { uid: me.id, delta: LOSS_POINTS });
+      await supabase.rpc("increment_losses", { uid: me.id });
+    }
+
+    // ── Achievements ──
+    const { data: updatedP } = await supabase
+      .from("profiles").select("*").eq("id", me.id).single();
+    if (updatedP) {
+      const { data: refCount } = await supabase.rpc("get_referral_count", { uid: me.id });
+      const stats = {
+        total_games: (updatedP.wins ?? 0) + (updatedP.losses ?? 0) + (updatedP.bot_games ?? 0),
+        pvp_wins:    updatedP.pvp_wins ?? 0,
+        bot_wins:    updatedP.bot_wins ?? 0,
+        max_insult_score: Math.max(playerScore, updatedP.max_insult_score ?? 0),
+        streak_days: updatedP.streak_days ?? 1,
+        referral_count: (refCount as number) ?? 0,
+      };
+      const unlocked = await checkAndUpdateAchievements(supabase, me.id, stats);
+      if (unlocked.length > 0) setNewAchievements(unlocked);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Ghost fight: start ────────────────────────────────────
+  const startGhostFight = useCallback(() => {
+    const me = profileRef.current;
+    if (!me || gameFoundRef.current) return;
+    gameFoundRef.current = true;
+
+    // Clean up real matchmaking
+    supabase.from("matchmaking_queue").delete().eq("user_id", me.id);
+    matchChanRef.current?.unsubscribe();
+    if (countdownRef.current) clearInterval(countdownRef.current);
+
+    // Generate fake opponent
+    const fakeRating = ghostRating(me.rating);
+    const fakeName   = ghostNick();
+    const fakeScore  = ghostScore(fakeRating);
+    const fakeInsult = getBotInsult(fakeScore).text;
+
+    ghostScoreRef.current  = fakeScore;
+    ghostInsultRef.current = fakeInsult;
+    isGhostRef.current = true;
+    setIsGhostMatch(true);
+
+    setOpponent({
+      id: "ghost",
+      username: fakeName,
+      avatar_url: null,
+      rating: fakeRating,
+      wins: 0, losses: 0,
+    } as unknown as Profile);
+
+    // Flash "Соперник найден!" for 1.5s, then start fight
+    setMatchFoundFlash(true);
+    setTimeout(() => {
+      setMatchFoundFlash(false);
+      setPhase("fighting");
+      setTimerRunning(true);
+    }, 1500);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Real PvP: subscribe to game updates ──────────────────
   const subscribeToGame = useCallback((gameId: string) => {
     gameChanRef.current = supabase
       .channel(`game-${gameId}`)
@@ -73,12 +234,13 @@ export default function PvPPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── Real PvP: resolve ─────────────────────────────────────
   const resolveGame = useCallback(async (g: Game) => {
     const me = profileRef.current;
     if (!me || !g.player1_insult || !g.player2_insult) return;
 
-    const score1 = scoreInsult(g.player1_insult);
-    const score2 = scoreInsult(g.player2_insult);
+    const score1   = scoreInsult(g.player1_insult);
+    const score2   = scoreInsult(g.player2_insult);
     const winnerId = score1 > score2 ? g.player1_id : score2 > score1 ? g.player2_id : null;
 
     await supabase.from("games").update({
@@ -88,31 +250,39 @@ export default function PvPPage() {
       status: "finished",
     }).eq("id", g.id);
 
-    const isP1 = me.id === g.player1_id;
-    const myScore = isP1 ? score1 : score2;
+    const isP1     = me.id === g.player1_id;
+    const myScore  = isP1 ? score1 : score2;
     const theirScore = isP1 ? score2 : score1;
-    const theirId = isP1 ? g.player2_id! : g.player1_id;
+    const theirId  = isP1 ? g.player2_id! : g.player1_id;
 
     if (myScore > theirScore) {
       setRatingChange(WIN_POINTS);
-      await supabase.rpc("increment_rating", { uid: me.id, delta: WIN_POINTS });
-      await supabase.rpc("increment_wins", { uid: me.id });
-      await supabase.rpc("increment_rating", { uid: theirId, delta: LOSS_POINTS });
-      await supabase.rpc("increment_losses", { uid: theirId });
+      await supabase.rpc("increment_rating",   { uid: me.id,   delta: WIN_POINTS });
+      await supabase.rpc("increment_wins",     { uid: me.id });
+      await supabase.rpc("increment_pvp_wins", { uid: me.id }); // for achievements
+      await supabase.rpc("increment_rating",   { uid: theirId, delta: LOSS_POINTS });
+      await supabase.rpc("increment_losses",   { uid: theirId });
     } else if (theirScore > myScore) {
       setRatingChange(LOSS_POINTS);
-      await supabase.rpc("increment_rating", { uid: me.id, delta: LOSS_POINTS });
-      await supabase.rpc("increment_losses", { uid: me.id });
-      await supabase.rpc("increment_rating", { uid: theirId, delta: WIN_POINTS });
-      await supabase.rpc("increment_wins", { uid: theirId });
+      await supabase.rpc("increment_rating",   { uid: me.id,   delta: LOSS_POINTS });
+      await supabase.rpc("increment_losses",   { uid: me.id });
+      await supabase.rpc("increment_rating",   { uid: theirId, delta: WIN_POINTS });
+      await supabase.rpc("increment_wins",     { uid: theirId });
+      await supabase.rpc("increment_pvp_wins", { uid: theirId }); // for achievements
     }
     setPhase("result");
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── Real PvP: match found ─────────────────────────────────
   const handleGameFound = useCallback(async (g: Game) => {
     if (gameFoundRef.current) return;
     gameFoundRef.current = true;
+
+    // Cancel ghost timer if it was set
+    if (ghostTimerRef.current) clearTimeout(ghostTimerRef.current);
+    if (countdownRef.current) clearInterval(countdownRef.current);
+
     matchChanRef.current?.unsubscribe();
 
     setGame(g);
@@ -125,36 +295,44 @@ export default function PvPPage() {
         .from("profiles").select("*").eq("id", opponentId).single();
       setOpponent(opp);
     }
-    setPhase("fighting");
-    setTimerRunning(true);
-    subscribeToGame(g.id);
+
+    setMatchFoundFlash(true);
+    setTimeout(() => {
+      setMatchFoundFlash(false);
+      setPhase("fighting");
+      setTimerRunning(true);
+      subscribeToGame(g.id);
+    }, 1500);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subscribeToGame]);
 
+  // ── Join matchmaking ──────────────────────────────────────
   const joinMatchmaking = async () => {
     const me = profileRef.current;
     if (!me) return;
     gameFoundRef.current = false;
+    isGhostRef.current   = false;
+    setIsGhostMatch(false);
+    setMatchFoundFlash(false);
+    setSearchSecs(0);
     setPhase("searching");
 
     await supabase.from("matchmaking_queue").delete().eq("user_id", me.id);
 
+    // Subscribe BEFORE inserting into queue
     matchChanRef.current = supabase
       .channel(`matchmaking-${me.id}`)
-      .on(
-        "postgres_changes",
+      .on("postgres_changes",
         { event: "INSERT", schema: "public", table: "games", filter: `player1_id=eq.${me.id}` },
-        ({ new: g }: { new: unknown }) => handleGameFound(g as Game)
-      )
-      .on(
-        "postgres_changes",
+        ({ new: g }: { new: unknown }) => handleGameFound(g as Game))
+      .on("postgres_changes",
         { event: "INSERT", schema: "public", table: "games", filter: `player2_id=eq.${me.id}` },
-        ({ new: g }: { new: unknown }) => handleGameFound(g as Game)
-      )
+        ({ new: g }: { new: unknown }) => handleGameFound(g as Game))
       .subscribe();
 
     await supabase.from("matchmaking_queue").insert({ user_id: me.id });
 
+    // Try to match immediately with someone already waiting
     const { data: queue } = await supabase
       .from("matchmaking_queue")
       .select("user_id")
@@ -171,22 +349,45 @@ export default function PvPPage() {
       if (!error && newGameId) {
         const { data: newGame } = await supabase
           .from("games").select("*").eq("id", newGameId).single();
-        if (newGame) handleGameFound(newGame as Game);
+        if (newGame) { handleGameFound(newGame as Game); return; }
       }
     }
+
+    // No immediate match — start search countdown and ghost timer
+    countdownRef.current = setInterval(() => {
+      setSearchSecs(s => s + 1);
+    }, 1000);
+
+    ghostTimerRef.current = setTimeout(() => {
+      if (!gameFoundRef.current) startGhostFight();
+    }, 20000);
   };
 
+  // ── Submit insult ─────────────────────────────────────────
   const submitInsult = useCallback(async (text?: string) => {
-    const g = gameRef.current;
-    const me = profileRef.current;
-    if (!g || !me || submittedRef.current) return;
+    if (submittedRef.current) return;
     submittedRef.current = true;
     setSubmitted(true);
     setTimerRunning(false);
 
     const finalText = text ?? insultRef.current;
-    const field = me.id === g.player1_id ? "player1_insult" : "player2_insult";
 
+    // ── Ghost fight path ──
+    if (isGhostRef.current) {
+      // Fake 1–4s delay as if waiting for opponent
+      const delay = 1000 + Math.random() * 3000;
+      resolveTimerRef.current = setTimeout(() => {
+        resolveGhostFight(finalText);
+      }, delay);
+      return;
+    }
+
+    // ── Real PvP path ──
+    const g  = gameRef.current;
+    const me = profileRef.current;
+    if (!g || !me) return;
+
+    const field = me.id === g.player1_id ? "player1_insult" : "player2_insult";
     const { data: updated } = await supabase
       .from("games").update({ [field]: finalText || "" })
       .eq("id", g.id).select().single();
@@ -200,7 +401,7 @@ export default function PvPPage() {
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolveGame]);
+  }, [resolveGame, resolveGhostFight]);
 
   const handleTimerExpire = useCallback(() => submitInsult(""), [submitInsult]);
 
@@ -208,32 +409,46 @@ export default function PvPPage() {
     const me = profileRef.current;
     if (me) await supabase.from("matchmaking_queue").delete().eq("user_id", me.id);
     matchChanRef.current?.unsubscribe();
+    if (ghostTimerRef.current) clearTimeout(ghostTimerRef.current);
+    if (countdownRef.current) clearInterval(countdownRef.current);
     gameFoundRef.current = false;
     setPhase("lobby");
+    setSearchSecs(0);
+    setMatchFoundFlash(false);
   };
 
   const resetGame = () => {
-    gameFoundRef.current = false;
-    submittedRef.current = false;
+    gameFoundRef.current  = false;
+    submittedRef.current  = false;
+    isGhostRef.current    = false;
+    insultRef.current     = "";
     setPhase("lobby");
     setGame(null);
     setOpponent(null);
     setInsult("");
     setSubmitted(false);
     setRatingChange(0);
-    insultRef.current = "";
+    setIsGhostMatch(false);
+    setNewAchievements([]);
+    setSearchSecs(0);
+    setMatchFoundFlash(false);
   };
 
-  const myScore = game && profile
+  // ── Derived display values ────────────────────────────────
+  const myScore   = game && profile
     ? (profile.id === game.player1_id ? game.player1_score : game.player2_score) : null;
-  const oppScore = game && profile
+  const oppScore  = game && profile
     ? (profile.id === game.player1_id ? game.player2_score : game.player1_score) : null;
-  const myInsult = game && profile
+  const myInsult  = game && profile
     ? (profile.id === game.player1_id ? game.player1_insult : game.player2_insult) : null;
   const oppInsult = game && profile
     ? (profile.id === game.player1_id ? game.player2_insult : game.player1_insult) : null;
-  const iWon = myScore !== null && oppScore !== null && myScore > oppScore;
+  const iWon  = myScore !== null && oppScore !== null && myScore > oppScore;
   const isDraw = myScore !== null && oppScore !== null && myScore === oppScore;
+
+  const oppRank = opponent ? getRankForRating(opponent.rating) : null;
+
+  // ─────────────────────────────────────────────────────────
 
   return (
     <div className="min-h-screen">
@@ -247,6 +462,7 @@ export default function PvPPage() {
           </span>
         </div>
 
+        {/* ── Lobby ── */}
         {phase === "lobby" && (
           <div className="rounded-xl border border-[#1e1e1e] bg-[#0f0f0f] p-8 text-center">
             <div className="text-6xl mb-4">⚔️</div>
@@ -266,32 +482,65 @@ export default function PvPPage() {
           </div>
         )}
 
+        {/* ── Searching ── */}
         {phase === "searching" && (
           <div className="rounded-xl border border-orange-500/20 bg-[#0f0f0f] p-8 text-center">
-            <div className="text-5xl mb-4 animate-bounce">🔍</div>
-            <h2 className="text-xl font-bold text-white mb-2">Ищем соперника...</h2>
-            <p className="text-slate-500 mb-6">Ожидаем пока кто-то примет вызов</p>
-            <div className="flex gap-2 justify-center mb-6">
-              {[0, 1, 2].map(i => (
-                <div key={i} className="w-2 h-2 rounded-full bg-orange-500 animate-bounce"
-                  style={{ animationDelay: `${i * 0.2}s` }} />
-              ))}
-            </div>
-            <button onClick={leaveQueue} className="text-sm text-slate-600 hover:text-slate-400 transition-colors">
-              Отмена
-            </button>
+            {matchFoundFlash ? (
+              <>
+                <div className="text-5xl mb-4">🔥</div>
+                <h2 className="text-xl font-bold text-green-400 mb-2">Соперник найден!</h2>
+                <p className="text-slate-500">Готовимся к бою...</p>
+              </>
+            ) : (
+              <>
+                <div className="text-5xl mb-4 animate-bounce">🔍</div>
+                <h2 className="text-xl font-bold text-white mb-2">Ищем соперника...</h2>
+                <p className="text-slate-500 mb-1">Ожидаем пока кто-то примет вызов</p>
+                <p className="text-xs text-slate-700 mb-6">
+                  Поиск идёт уже {searchSecs}с
+                </p>
+                <div className="flex gap-2 justify-center mb-6">
+                  {[0, 1, 2].map(i => (
+                    <div key={i} className="w-2 h-2 rounded-full bg-orange-500 animate-bounce"
+                      style={{ animationDelay: `${i * 0.2}s` }} />
+                  ))}
+                </div>
+                <button onClick={leaveQueue} className="text-sm text-slate-600 hover:text-slate-400 transition-colors">
+                  Отмена
+                </button>
+              </>
+            )}
           </div>
         )}
 
+        {/* ── Fighting ── */}
         {phase === "fighting" && (
           <div className="space-y-4">
+            {/* Opponent banner */}
             {opponent && (
-              <div className="flex items-center justify-between rounded-xl border border-red-900/30 bg-red-950/10 p-3">
-                <span className="text-sm text-slate-400">Соперник:</span>
-                <span className="font-bold text-red-400">{opponent.username}</span>
-                <span className="text-xs text-slate-600">{submitted ? "Уже написал..." : "Пишет..."}</span>
+              <div className="flex items-center gap-3 rounded-xl border border-red-900/30 bg-red-950/10 p-3">
+                <div className="w-8 h-8 rounded-full bg-red-900/40 border border-red-700/40 flex items-center justify-center text-xs font-bold text-red-400">
+                  {opponent.username[0]?.toUpperCase()}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <span className="font-bold text-red-400 block truncate">{opponent.username}</span>
+                  {oppRank && (
+                    <span className={`text-xs ${oppRank.color}`}>
+                      {oppRank.emoji} {oppRank.name} · {opponent.rating} ОР
+                    </span>
+                  )}
+                </div>
+                <span className={`text-xs px-2 py-0.5 rounded-full ${
+                  submitted
+                    ? "bg-green-950/50 text-green-400 border border-green-800/30"
+                    : "bg-slate-800/50 text-slate-400 border border-slate-700/30 animate-pulse"
+                }`}>
+                  {submitted ? "Уже написал ✓" : "Пишет..."}
+                </span>
               </div>
             )}
+
+            {/* Input area */}
             <div className="rounded-xl border border-orange-500/30 bg-[#0f0f0f] p-6">
               <div className="flex justify-between items-start mb-4">
                 <div>
@@ -330,10 +579,22 @@ export default function PvPPage() {
           </div>
         )}
 
+        {/* ── Result ── */}
         {phase === "result" && game && (
           <div className="space-y-4">
+            {/* Achievement notification */}
+            {newAchievements.length > 0 && (
+              <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 p-3">
+                <p className="text-amber-400 font-bold text-sm mb-1">🏆 Новые достижения!</p>
+                {newAchievements.map((u, i) => (
+                  <p key={i} className="text-amber-300 text-xs">• {u}</p>
+                ))}
+              </div>
+            )}
+
+            {/* Result banner */}
             <div className={`rounded-xl p-6 text-center border ${
-              iWon ? "border-green-500/30 bg-green-950/20"
+              iWon  ? "border-green-500/30 bg-green-950/20"
               : isDraw ? "border-slate-500/30 bg-slate-900/20"
               : "border-red-500/30 bg-red-950/20"
             }`}>
@@ -348,8 +609,12 @@ export default function PvPPage() {
                   {ratingChange > 0 ? "+" : ""}{ratingChange} ОР
                 </div>
               )}
+              {isGhostMatch && (
+                <p className="text-xs text-slate-600 mt-2">засчитано как PvP бой</p>
+              )}
             </div>
 
+            {/* Scores comparison */}
             <div className="grid grid-cols-2 gap-3">
               <div className="rounded-xl border border-[#1e1e1e] bg-[#0f0f0f] p-4">
                 <p className="text-xs text-slate-500 font-bold mb-1">Ты</p>
