@@ -1,11 +1,11 @@
 "use client";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase";
 import DisclaimerModal from "@/components/DisclaimerModal";
 
-export default function RegisterPage() {
+function RegisterForm() {
   const [step, setStep] = useState<"disclaimer" | "form">("disclaimer");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -257,5 +257,18 @@ export default function RegisterPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+// Suspense нужен потому что useSearchParams() читает URL параметры (?ref=...)
+export default function RegisterPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-orange-500 animate-pulse font-impact text-2xl">ЗАГРУЗКА...</div>
+      </div>
+    }>
+      <RegisterForm />
+    </Suspense>
   );
 }
