@@ -5,6 +5,50 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase";
 import DisclaimerModal from "@/components/DisclaimerModal";
 
+// Конвертируем любой файл-изображение в JPEG через canvas
+// Решает проблему с HEIC/HEIF фото с iPhone/iPad
+async function toJpeg(file: File): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      // Ограничиваем размер до 800×800 чтобы не перегружать память на iOS
+      const MAX = 800;
+      let { width, height } = img;
+      if (width > MAX || height > MAX) {
+        const ratio = Math.min(MAX / width, MAX / height);
+        width  = Math.round(width  * ratio);
+        height = Math.round(height * ratio);
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width  = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) { reject(new Error("canvas error")); return; }
+      ctx.drawImage(img, 0, 0, width, height);
+      canvas.toBlob(
+        (blob) => blob ? resolve(blob) : reject(new Error("toBlob failed")),
+        "image/jpeg",
+        0.85,
+      );
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("image load error")); };
+    img.src = url;
+  });
+}
+
+// Приводим имя к ASCII для использования в email
+function toAsciiSlug(text: string): string {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")  // убираем диакритику
+    .replace(/[^a-z0-9]/g, "x")        // кириллицу и символы → x
+    .replace(/^x+/, "")                 // убираем ведущие x
+    .slice(0, 20) || "player";
+}
+
 function RegisterForm() {
   const [step, setStep] = useState<"disclaimer" | "form">("disclaimer");
   const [username, setUsername] = useState("");
@@ -28,9 +72,19 @@ function RegisterForm() {
   const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    // Ограничение размера — 10 МБ до конвертации
+    if (file.size > 10 * 1024 * 1024) {
+      setError("Файл слишком большой. Максимум 10 МБ.");
+      return;
+    }
+    setError("");
     setAvatarFile(file);
+
+    // Превью через FileReader
     const reader = new FileReader();
     reader.onloadend = () => setAvatarPreview(reader.result as string);
+    reader.onerror   = () => setAvatarPreview(null);
     reader.readAsDataURL(file);
   };
 
@@ -54,12 +108,12 @@ function RegisterForm() {
         return;
       }
 
-      // Если email не введён — генерируем технический адрес
-      // (Supabase требует email, но пользователь его не видит)
+      // Email для Supabase Auth
+      // Если не указан — генерируем технический (только ASCII в local-части!)
       const rand = Math.random().toString(36).slice(2, 8);
       const authEmail = email.trim()
         ? email.trim()
-        : `${cleanUsername.toLowerCase()}.${rand}@oskorblator.noemail`;
+        : `${toAsciiSlug(cleanUsername)}.${rand}@players.oskorblator.app`;
 
       const { data: authData, error: signUpError } = await supabase.auth.signUp({
         email: authEmail,
@@ -67,7 +121,6 @@ function RegisterForm() {
         options: {
           data: {
             username: cleanUsername,
-            // Флаг — использовал ли реальный email
             has_real_email: !!email.trim(),
           },
         },
@@ -78,28 +131,30 @@ function RegisterForm() {
       const userId = authData.user?.id;
       if (!userId) throw new Error("Ошибка создания аккаунта");
 
-      // Загрузка аватарки
-      let avatarUrl: string | null = null;
+      // Загрузка аватарки (опционально, ошибка не блокирует регистрацию)
       if (avatarFile) {
-        const ext = avatarFile.name.split(".").pop();
-        const path = `${userId}/avatar.${ext}`;
-        const { error: uploadError } = await supabase.storage
-          .from("avatars")
-          .upload(path, avatarFile, { upsert: true });
+        try {
+          // Конвертируем в JPEG — решает проблему HEIC/HEIF с iPhone/iPad
+          const jpeg = await toJpeg(avatarFile);
+          const path = `${userId}/avatar.jpg`;
 
-        if (!uploadError) {
-          const { data: urlData } = supabase.storage
+          const { error: uploadError } = await supabase.storage
             .from("avatars")
-            .getPublicUrl(path);
-          avatarUrl = urlData.publicUrl;
-        }
-      }
+            .upload(path, jpeg, { contentType: "image/jpeg" }); // без upsert для новых юзеров
 
-      if (avatarUrl) {
-        await supabase
-          .from("profiles")
-          .update({ avatar_url: avatarUrl })
-          .eq("id", userId);
+          if (!uploadError) {
+            const { data: urlData } = supabase.storage
+              .from("avatars")
+              .getPublicUrl(path);
+            await supabase
+              .from("profiles")
+              .update({ avatar_url: urlData.publicUrl })
+              .eq("id", userId);
+          }
+          // Не бросаем ошибку — аватарка не критична для регистрации
+        } catch {
+          // Молчим — регистрация продолжается без аватарки
+        }
       }
 
       // Обрабатываем реферальный код
@@ -117,14 +172,23 @@ function RegisterForm() {
 
       router.push("/dashboard");
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Что-то пошло не так";
-      // Переводим типичные ошибки Supabase на русский
-      if (msg.includes("already registered")) {
+      const raw = err instanceof Error ? err.message : String(err);
+
+      // Переводим типичные ошибки на русский
+      if (raw.includes("already registered") || raw.includes("already been registered")) {
         setError("Этот email уже используется.");
-      } else if (msg.includes("Password should be")) {
+      } else if (raw.includes("Password should be") || raw.includes("password")) {
         setError("Пароль слишком короткий — минимум 6 символов.");
+      } else if (
+        raw.includes("Load failed") ||
+        raw.includes("Failed to fetch") ||
+        raw.includes("NetworkError") ||
+        raw.includes("network") ||
+        raw.includes("fetch")
+      ) {
+        setError("Ошибка соединения. Проверь интернет и попробуй ещё раз.");
       } else {
-        setError(msg);
+        setError(raw || "Что-то пошло не так");
       }
     } finally {
       setLoading(false);
