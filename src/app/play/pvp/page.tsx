@@ -16,7 +16,7 @@ import type { RealtimeChannel } from "@supabase/supabase-js";
 const G_ADJ = [
   "Кровавый","Злобный","Бешеный","Ядовитый","Дикий","Тёмный","Безумный",
   "Лютый","Страшный","Грозный","Матёрый","Шальной","Яростный","Коварный",
-  "Лихой","Свирепый","Буйный","Дерзкий","Зверский","Бешеный",
+  "Лихой","Свирепый","Буйный","Дерзкий","Зверский","Беспощадный",
 ];
 const G_NAMES = [
   "Вася","Петя","Колян","Серёга","Дима","Антоха","Сашок","Миша",
@@ -29,24 +29,14 @@ function ghostNick() {
   const r = <T,>(a: T[]) => a[Math.floor(Math.random() * a.length)];
   return r(G_ADJ) + r(G_NAMES) + r(G_SFX);
 }
-
 function ghostRating(my: number) {
-  // ±200 of real rating, minimum 0
   return Math.max(0, my + Math.floor(Math.random() * 400) - 200);
 }
-
 function ghostScore(rating: number): number {
-  // Score range by rank bracket:
-  // lowest rank: 10+, highest rank: 80+
   const bands: [number, number, number, number][] = [
-    [0,    200,  10, 24],
-    [200,  400,  20, 34],
-    [400,  650,  30, 49],
-    [650,  1000, 45, 64],
-    [1000, 1400, 55, 74],
-    [1400, 1900, 65, 79],
-    [1900, 2500, 70, 89],
-    [2500, Infinity, 80, 99],
+    [0,    200,  10, 24], [200,  400,  20, 34], [400,  650,  30, 49],
+    [650,  1000, 45, 64], [1000, 1400, 55, 74], [1400, 1900, 65, 79],
+    [1900, 2500, 70, 89], [2500, Infinity, 80, 99],
   ];
   const [,, lo, hi] = bands.find(([a, b]) => rating >= a && rating < b) ?? bands[0];
   return lo + Math.floor(Math.random() * (hi - lo + 1));
@@ -57,22 +47,21 @@ function ghostScore(rating: number): number {
 type Phase = "lobby" | "searching" | "fighting" | "result";
 
 export default function PvPPage() {
-  const [phase, setPhase]                 = useState<Phase>("lobby");
-  const [profile, setProfile]             = useState<Profile | null>(null);
-  const [opponent, setOpponent]           = useState<Profile | null>(null);
-  const [game, setGame]                   = useState<Game | null>(null);
-  const [insult, setInsult]               = useState("");
-  const [timerRunning, setTimerRunning]   = useState(false);
-  const [submitted, setSubmitted]         = useState(false);
-  const [ratingChange, setRatingChange]   = useState(0);
-  const [isGhostMatch, setIsGhostMatch]   = useState(false);
+  const [phase, setPhase]                     = useState<Phase>("lobby");
+  const [profile, setProfile]                 = useState<Profile | null>(null);
+  const [opponent, setOpponent]               = useState<Profile | null>(null);
+  const [game, setGame]                       = useState<Game | null>(null);
+  const [insult, setInsult]                   = useState("");
+  const [timerRunning, setTimerRunning]       = useState(false);
+  const [submitted, setSubmitted]             = useState(false);
+  // ── Bug 3 fix: track opponent submission separately ──
+  const [opponentSubmitted, setOpponentSubmitted] = useState(false);
+  const [ratingChange, setRatingChange]       = useState(0);
+  const [isGhostMatch, setIsGhostMatch]       = useState(false);
   const [newAchievements, setNewAchievements] = useState<string[]>([]);
-  // searching countdown (counts UP for UX — doesn't reveal timeout)
-  const [searchSecs, setSearchSecs]       = useState(0);
-  // brief "Соперник найден!" flash before fighting
+  const [searchSecs, setSearchSecs]           = useState(0);
   const [matchFoundFlash, setMatchFoundFlash] = useState(false);
 
-  // ── Refs (safe to use in closures / realtime callbacks) ──
   const profileRef    = useRef<Profile | null>(null);
   const gameFoundRef  = useRef(false);
   const gameRef       = useRef<Game | null>(null);
@@ -83,6 +72,8 @@ export default function PvPPage() {
   const ghostTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resolveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownRef  = useRef<ReturnType<typeof setInterval> | null>(null);
+  // ── Bug 1/2 fix: force-resolve stuck games ──
+  const stuckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isGhostRef    = useRef(false);
   const ghostScoreRef = useRef(0);
   const ghostInsultRef = useRef("");
@@ -95,7 +86,13 @@ export default function PvPPage() {
   useEffect(() => { submittedRef.current = submitted; }, [submitted]);
   useEffect(() => { insultRef.current = insult; }, [insult]);
 
-  // Cleanup on unmount
+  const clearAllTimers = useCallback(() => {
+    if (ghostTimerRef.current)   { clearTimeout(ghostTimerRef.current);   ghostTimerRef.current   = null; }
+    if (resolveTimerRef.current) { clearTimeout(resolveTimerRef.current); resolveTimerRef.current = null; }
+    if (countdownRef.current)    { clearInterval(countdownRef.current);   countdownRef.current    = null; }
+    if (stuckTimerRef.current)   { clearTimeout(stuckTimerRef.current);   stuckTimerRef.current   = null; }
+  }, []);
+
   useEffect(() => {
     supabase.auth.getUser().then(({ data: { user } }) => {
       if (!user) { router.push("/login"); return; }
@@ -105,10 +102,49 @@ export default function PvPPage() {
     return () => {
       matchChanRef.current?.unsubscribe();
       gameChanRef.current?.unsubscribe();
-      if (ghostTimerRef.current) clearTimeout(ghostTimerRef.current);
-      if (resolveTimerRef.current) clearTimeout(resolveTimerRef.current);
-      if (countdownRef.current) clearInterval(countdownRef.current);
+      clearAllTimers();
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Bug 1/2: force-resolve if opponent disappeared ────────
+  const forceResolveIfStuck = useCallback(async () => {
+    const g  = gameRef.current;
+    const me = profileRef.current;
+    if (!g || !me) return;
+
+    // Fetch fresh state to avoid acting on stale data
+    const { data: fresh } = await supabase
+      .from("games").select("*").eq("id", g.id).single();
+
+    // Abort if game already resolved or this game is no longer active
+    if (!fresh || fresh.status === "finished" || gameRef.current?.id !== g.id) return;
+
+    const isP1    = me.id === fresh.player1_id;
+    const myIns   = isP1 ? fresh.player1_insult : fresh.player2_insult;
+    const oppIns  = isP1 ? fresh.player2_insult : fresh.player1_insult;
+    const myField = isP1 ? "player1_insult" : "player2_insult";
+    const opField = isP1 ? "player2_insult" : "player1_insult";
+
+    if (oppIns !== null) return; // Opponent did submit — game should resolve via realtime soon
+
+    const updates: Record<string, string> = { [opField]: "" };
+    if (myIns === null) updates[myField] = ""; // also submit empty for me if I haven't
+
+    // Use .neq("status","finished") as optimistic lock against double-execution
+    const { data: updated } = await supabase
+      .from("games")
+      .update(updates)
+      .eq("id", fresh.id)
+      .neq("status", "finished")
+      .select().single();
+
+    if (updated) {
+      const ug = updated as Game;
+      setGame(ug);
+      gameRef.current = ug;
+      resolveGame(ug);
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -116,6 +152,8 @@ export default function PvPPage() {
   const resolveGhostFight = useCallback(async (playerInsult: string) => {
     const me = profileRef.current;
     if (!me) return;
+
+    if (stuckTimerRef.current) { clearTimeout(stuckTimerRef.current); stuckTimerRef.current = null; }
 
     const playerScore = scoreInsult(playerInsult);
     const botScore    = ghostScoreRef.current;
@@ -126,7 +164,6 @@ export default function PvPPage() {
     const delta = won ? WIN_POINTS : draw ? 0 : LOSS_POINTS;
     setRatingChange(delta);
 
-    // Build a fake game object for the result UI
     const fakeGame = {
       id: "ghost-" + Date.now(),
       player1_id: me.id,
@@ -143,30 +180,26 @@ export default function PvPPage() {
     gameRef.current = fakeGame;
     setPhase("result");
 
-    // ── DB updates ──
     await supabase.rpc("update_streak", { uid: me.id });
-
     if (won) {
-      await supabase.rpc("increment_rating", { uid: me.id, delta: WIN_POINTS });
-      await supabase.rpc("increment_wins",   { uid: me.id });
+      await supabase.rpc("increment_rating",   { uid: me.id, delta: WIN_POINTS });
+      await supabase.rpc("increment_wins",     { uid: me.id });
       await supabase.rpc("increment_pvp_wins", { uid: me.id });
     } else if (!draw) {
-      await supabase.rpc("increment_rating", { uid: me.id, delta: LOSS_POINTS });
-      await supabase.rpc("increment_losses", { uid: me.id });
+      await supabase.rpc("increment_rating",   { uid: me.id, delta: LOSS_POINTS });
+      await supabase.rpc("increment_losses",   { uid: me.id });
     }
 
-    // ── Achievements ──
-    const { data: updatedP } = await supabase
-      .from("profiles").select("*").eq("id", me.id).single();
+    const { data: updatedP } = await supabase.from("profiles").select("*").eq("id", me.id).single();
     if (updatedP) {
-      const { data: refCount } = await supabase.rpc("get_referral_count", { uid: me.id });
+      const { data: rc } = await supabase.rpc("get_referral_count", { uid: me.id });
       const stats = {
         total_games: (updatedP.wins ?? 0) + (updatedP.losses ?? 0) + (updatedP.bot_games ?? 0),
         pvp_wins:    updatedP.pvp_wins ?? 0,
         bot_wins:    updatedP.bot_wins ?? 0,
         max_insult_score: Math.max(playerScore, updatedP.max_insult_score ?? 0),
         streak_days: updatedP.streak_days ?? 1,
-        referral_count: (refCount as number) ?? 0,
+        referral_count: (rc as number) ?? 0,
       };
       const unlocked = await checkAndUpdateAchievements(supabase, me.id, stats);
       if (unlocked.length > 0) setNewAchievements(unlocked);
@@ -180,12 +213,10 @@ export default function PvPPage() {
     if (!me || gameFoundRef.current) return;
     gameFoundRef.current = true;
 
-    // Clean up real matchmaking
     supabase.from("matchmaking_queue").delete().eq("user_id", me.id);
     matchChanRef.current?.unsubscribe();
-    if (countdownRef.current) clearInterval(countdownRef.current);
+    if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null; }
 
-    // Generate fake opponent
     const fakeRating = ghostRating(me.rating);
     const fakeName   = ghostNick();
     const fakeScore  = ghostScore(fakeRating);
@@ -193,18 +224,14 @@ export default function PvPPage() {
 
     ghostScoreRef.current  = fakeScore;
     ghostInsultRef.current = fakeInsult;
-    isGhostRef.current = true;
+    isGhostRef.current     = true;
     setIsGhostMatch(true);
 
     setOpponent({
-      id: "ghost",
-      username: fakeName,
-      avatar_url: null,
-      rating: fakeRating,
-      wins: 0, losses: 0,
+      id: "ghost", username: fakeName, avatar_url: null,
+      rating: fakeRating, wins: 0, losses: 0,
     } as unknown as Profile);
 
-    // Flash "Соперник найден!" for 1.5s, then start fight
     setMatchFoundFlash(true);
     setTimeout(() => {
       setMatchFoundFlash(false);
@@ -215,39 +242,20 @@ export default function PvPPage() {
   }, []);
 
   // ── Real PvP: subscribe to game updates ──────────────────
-  const subscribeToGame = useCallback((gameId: string) => {
-    gameChanRef.current = supabase
-      .channel(`game-${gameId}`)
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "games", filter: `id=eq.${gameId}` },
-        ({ new: updated }: { new: unknown }) => {
-          const g = updated as Game;
-          setGame(g);
-          gameRef.current = g;
-          if (g.player1_insult !== null && g.player2_insult !== null && g.status !== "finished") {
-            resolveGame(g);
-          }
-        }
-      )
-      .subscribe();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // ── Real PvP: resolve ─────────────────────────────────────
   const resolveGame = useCallback(async (g: Game) => {
     const me = profileRef.current;
     if (!me || !g.player1_insult || !g.player2_insult) return;
+
+    // Clear stuck timer — game is resolving normally
+    if (stuckTimerRef.current) { clearTimeout(stuckTimerRef.current); stuckTimerRef.current = null; }
 
     const score1   = scoreInsult(g.player1_insult);
     const score2   = scoreInsult(g.player2_insult);
     const winnerId = score1 > score2 ? g.player1_id : score2 > score1 ? g.player2_id : null;
 
     await supabase.from("games").update({
-      player1_score: score1,
-      player2_score: score2,
-      winner_id: winnerId,
-      status: "finished",
+      player1_score: score1, player2_score: score2,
+      winner_id: winnerId, status: "finished",
     }).eq("id", g.id);
 
     const isP1     = me.id === g.player1_id;
@@ -259,7 +267,7 @@ export default function PvPPage() {
       setRatingChange(WIN_POINTS);
       await supabase.rpc("increment_rating",   { uid: me.id,   delta: WIN_POINTS });
       await supabase.rpc("increment_wins",     { uid: me.id });
-      await supabase.rpc("increment_pvp_wins", { uid: me.id }); // for achievements
+      await supabase.rpc("increment_pvp_wins", { uid: me.id });
       await supabase.rpc("increment_rating",   { uid: theirId, delta: LOSS_POINTS });
       await supabase.rpc("increment_losses",   { uid: theirId });
     } else if (theirScore > myScore) {
@@ -268,21 +276,46 @@ export default function PvPPage() {
       await supabase.rpc("increment_losses",   { uid: me.id });
       await supabase.rpc("increment_rating",   { uid: theirId, delta: WIN_POINTS });
       await supabase.rpc("increment_wins",     { uid: theirId });
-      await supabase.rpc("increment_pvp_wins", { uid: theirId }); // for achievements
+      await supabase.rpc("increment_pvp_wins", { uid: theirId });
     }
     setPhase("result");
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const subscribeToGame = useCallback((gameId: string) => {
+    gameChanRef.current = supabase
+      .channel(`game-${gameId}`)
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "games", filter: `id=eq.${gameId}` },
+        ({ new: updated }: { new: unknown }) => {
+          const g = updated as Game;
+          setGame(g);
+          gameRef.current = g;
+
+          // ── Bug 3 fix: detect opponent submission via DB state ──
+          const me = profileRef.current;
+          if (me) {
+            const oppInsult = me.id === g.player1_id ? g.player2_insult : g.player1_insult;
+            if (oppInsult !== null) setOpponentSubmitted(true);
+          }
+
+          if (g.player1_insult !== null && g.player2_insult !== null && g.status !== "finished") {
+            resolveGame(g);
+          }
+        }
+      )
+      .subscribe();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolveGame]);
 
   // ── Real PvP: match found ─────────────────────────────────
   const handleGameFound = useCallback(async (g: Game) => {
     if (gameFoundRef.current) return;
     gameFoundRef.current = true;
 
-    // Cancel ghost timer if it was set
-    if (ghostTimerRef.current) clearTimeout(ghostTimerRef.current);
-    if (countdownRef.current) clearInterval(countdownRef.current);
-
+    if (ghostTimerRef.current) { clearTimeout(ghostTimerRef.current); ghostTimerRef.current = null; }
+    if (countdownRef.current)  { clearInterval(countdownRef.current);  countdownRef.current  = null; }
     matchChanRef.current?.unsubscribe();
 
     setGame(g);
@@ -302,9 +335,12 @@ export default function PvPPage() {
       setPhase("fighting");
       setTimerRunning(true);
       subscribeToGame(g.id);
+
+      // ── Bug 1/2 fix: if opponent never submits, force-resolve after 65s ──
+      stuckTimerRef.current = setTimeout(() => forceResolveIfStuck(), 65000);
     }, 1500);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [subscribeToGame]);
+  }, [subscribeToGame, forceResolveIfStuck]);
 
   // ── Join matchmaking ──────────────────────────────────────
   const joinMatchmaking = async () => {
@@ -315,11 +351,11 @@ export default function PvPPage() {
     setIsGhostMatch(false);
     setMatchFoundFlash(false);
     setSearchSecs(0);
+    setOpponentSubmitted(false);
     setPhase("searching");
 
     await supabase.from("matchmaking_queue").delete().eq("user_id", me.id);
 
-    // Subscribe BEFORE inserting into queue
     matchChanRef.current = supabase
       .channel(`matchmaking-${me.id}`)
       .on("postgres_changes",
@@ -330,9 +366,10 @@ export default function PvPPage() {
         ({ new: g }: { new: unknown }) => handleGameFound(g as Game))
       .subscribe();
 
+    // ── Bug 1 fix: clean up stale queue entries before looking ──
+    await supabase.rpc("clean_matchmaking_queue");
     await supabase.from("matchmaking_queue").insert({ user_id: me.id });
 
-    // Try to match immediately with someone already waiting
     const { data: queue } = await supabase
       .from("matchmaking_queue")
       .select("user_id")
@@ -343,8 +380,7 @@ export default function PvPPage() {
     if (queue && queue.length > 0) {
       const opponentId = queue[0].user_id;
       const { data: newGameId, error } = await supabase.rpc("create_pvp_match", {
-        p1_id: opponentId,
-        p2_id: me.id,
+        p1_id: opponentId, p2_id: me.id,
       });
       if (!error && newGameId) {
         const { data: newGame } = await supabase
@@ -353,11 +389,8 @@ export default function PvPPage() {
       }
     }
 
-    // No immediate match — start search countdown and ghost timer
-    countdownRef.current = setInterval(() => {
-      setSearchSecs(s => s + 1);
-    }, 1000);
-
+    // No immediate match — start countdown and ghost timer
+    countdownRef.current = setInterval(() => setSearchSecs(s => s + 1), 1000);
     ghostTimerRef.current = setTimeout(() => {
       if (!gameFoundRef.current) startGhostFight();
     }, 20000);
@@ -374,10 +407,11 @@ export default function PvPPage() {
 
     // ── Ghost fight path ──
     if (isGhostRef.current) {
-      // Fake 1–4s delay as if waiting for opponent
-      const delay = 1000 + Math.random() * 3000;
+      const delay = 1500 + Math.random() * 2500; // 1.5–4s
       resolveTimerRef.current = setTimeout(() => {
-        resolveGhostFight(finalText);
+        // ── Bug 3 fix: mark ghost opponent as submitted just before resolving ──
+        setOpponentSubmitted(true);
+        setTimeout(() => resolveGhostFight(finalText), 400);
       }, delay);
       return;
     }
@@ -409,8 +443,7 @@ export default function PvPPage() {
     const me = profileRef.current;
     if (me) await supabase.from("matchmaking_queue").delete().eq("user_id", me.id);
     matchChanRef.current?.unsubscribe();
-    if (ghostTimerRef.current) clearTimeout(ghostTimerRef.current);
-    if (countdownRef.current) clearInterval(countdownRef.current);
+    clearAllTimers();
     gameFoundRef.current = false;
     setPhase("lobby");
     setSearchSecs(0);
@@ -418,15 +451,18 @@ export default function PvPPage() {
   };
 
   const resetGame = () => {
-    gameFoundRef.current  = false;
-    submittedRef.current  = false;
-    isGhostRef.current    = false;
-    insultRef.current     = "";
+    clearAllTimers();
+    gameFoundRef.current = false;
+    submittedRef.current = false;
+    isGhostRef.current   = false;
+    insultRef.current    = "";
+    gameRef.current      = null; // explicit clear so stuck timer guard works
     setPhase("lobby");
     setGame(null);
     setOpponent(null);
     setInsult("");
     setSubmitted(false);
+    setOpponentSubmitted(false);
     setRatingChange(0);
     setIsGhostMatch(false);
     setNewAchievements([]);
@@ -445,7 +481,6 @@ export default function PvPPage() {
     ? (profile.id === game.player1_id ? game.player2_insult : game.player1_insult) : null;
   const iWon  = myScore !== null && oppScore !== null && myScore > oppScore;
   const isDraw = myScore !== null && oppScore !== null && myScore === oppScore;
-
   const oppRank = opponent ? getRankForRating(opponent.rating) : null;
 
   // ─────────────────────────────────────────────────────────
@@ -496,16 +531,15 @@ export default function PvPPage() {
                 <div className="text-5xl mb-4 animate-bounce">🔍</div>
                 <h2 className="text-xl font-bold text-white mb-2">Ищем соперника...</h2>
                 <p className="text-slate-500 mb-1">Ожидаем пока кто-то примет вызов</p>
-                <p className="text-xs text-slate-700 mb-6">
-                  Поиск идёт уже {searchSecs}с
-                </p>
+                <p className="text-xs text-slate-700 mb-6">Поиск идёт уже {searchSecs}с</p>
                 <div className="flex gap-2 justify-center mb-6">
                   {[0, 1, 2].map(i => (
                     <div key={i} className="w-2 h-2 rounded-full bg-orange-500 animate-bounce"
                       style={{ animationDelay: `${i * 0.2}s` }} />
                   ))}
                 </div>
-                <button onClick={leaveQueue} className="text-sm text-slate-600 hover:text-slate-400 transition-colors">
+                <button onClick={leaveQueue}
+                  className="text-sm text-slate-600 hover:text-slate-400 transition-colors">
                   Отмена
                 </button>
               </>
@@ -516,7 +550,7 @@ export default function PvPPage() {
         {/* ── Fighting ── */}
         {phase === "fighting" && (
           <div className="space-y-4">
-            {/* Opponent banner */}
+            {/* Opponent banner — Bug 3 fix: use opponentSubmitted */}
             {opponent && (
               <div className="flex items-center gap-3 rounded-xl border border-red-900/30 bg-red-950/10 p-3">
                 <div className="w-8 h-8 rounded-full bg-red-900/40 border border-red-700/40 flex items-center justify-center text-xs font-bold text-red-400">
@@ -530,12 +564,13 @@ export default function PvPPage() {
                     </span>
                   )}
                 </div>
-                <span className={`text-xs px-2 py-0.5 rounded-full ${
-                  submitted
+                {/* ── Bug 3: this now shows OPPONENT's status, not mine ── */}
+                <span className={`text-xs px-2 py-0.5 rounded-full whitespace-nowrap ${
+                  opponentSubmitted
                     ? "bg-green-950/50 text-green-400 border border-green-800/30"
                     : "bg-slate-800/50 text-slate-400 border border-slate-700/30 animate-pulse"
                 }`}>
-                  {submitted ? "Уже написал ✓" : "Пишет..."}
+                  {opponentSubmitted ? "Написал ✓" : "Пишет..."}
                 </span>
               </div>
             )}
@@ -582,17 +617,13 @@ export default function PvPPage() {
         {/* ── Result ── */}
         {phase === "result" && game && (
           <div className="space-y-4">
-            {/* Achievement notification */}
             {newAchievements.length > 0 && (
               <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 p-3">
                 <p className="text-amber-400 font-bold text-sm mb-1">🏆 Новые достижения!</p>
-                {newAchievements.map((u, i) => (
-                  <p key={i} className="text-amber-300 text-xs">• {u}</p>
-                ))}
+                {newAchievements.map((u, i) => <p key={i} className="text-amber-300 text-xs">• {u}</p>)}
               </div>
             )}
 
-            {/* Result banner */}
             <div className={`rounded-xl p-6 text-center border ${
               iWon  ? "border-green-500/30 bg-green-950/20"
               : isDraw ? "border-slate-500/30 bg-slate-900/20"
@@ -614,7 +645,6 @@ export default function PvPPage() {
               )}
             </div>
 
-            {/* Scores comparison */}
             <div className="grid grid-cols-2 gap-3">
               <div className="rounded-xl border border-[#1e1e1e] bg-[#0f0f0f] p-4">
                 <p className="text-xs text-slate-500 font-bold mb-1">Ты</p>
@@ -648,10 +678,8 @@ export default function PvPPage() {
             </div>
 
             <div className="flex gap-3">
-              <button
-                onClick={resetGame}
-                className="flex-1 py-3 rounded-xl bg-orange-600 hover:bg-orange-500 font-bold text-white transition-colors"
-              >
+              <button onClick={resetGame}
+                className="flex-1 py-3 rounded-xl bg-orange-600 hover:bg-orange-500 font-bold text-white transition-colors">
                 Реванш! 🔥
               </button>
               <Link href="/leaderboard"
