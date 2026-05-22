@@ -164,6 +164,15 @@ export default function PvPPage() {
     const delta = won ? WIN_POINTS : draw ? 0 : LOSS_POINTS;
     setRatingChange(delta);
 
+    // ── Сохраняем в Скорбные Анналы ────────────────────────
+    if (playerInsult.trim() && playerScore > 0) {
+      supabase.from("insult_records").insert({
+        insult: playerInsult,
+        score: playerScore,
+        author_id: me.id,
+      }).then();
+    }
+
     const fakeGame = {
       id: "ghost-" + Date.now(),
       player1_id: me.id,
@@ -262,6 +271,16 @@ export default function PvPPage() {
     const myScore  = isP1 ? score1 : score2;
     const theirScore = isP1 ? score2 : score1;
     const theirId  = isP1 ? g.player2_id! : g.player1_id;
+
+    // ── Сохраняем в Скорбные Анналы (fire-and-forget) ───────
+    const myInsult = (isP1 ? g.player1_insult : g.player2_insult) ?? "";
+    if (myInsult.trim() && myScore > 0) {
+      supabase.from("insult_records").insert({
+        insult: myInsult,
+        score: myScore,
+        author_id: me.id,
+      }).then();
+    }
 
     if (myScore > theirScore) {
       setRatingChange(WIN_POINTS);

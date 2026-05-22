@@ -43,6 +43,9 @@ export default function Navbar() {
               <Link href="/leaderboard" className="text-sm text-slate-400 hover:text-orange-400 transition-colors hidden sm:block">
                 Рейтинг
               </Link>
+              <Link href="/annals" className="text-sm text-slate-400 hover:text-orange-400 transition-colors hidden sm:block">
+                Анналы
+              </Link>
               <Link href="/profile" className="text-sm text-slate-400 hover:text-orange-400 transition-colors hidden sm:block">
                 Профиль
               </Link>

@@ -56,6 +56,15 @@ export default function BotGamePage() {
     const uid = userIdRef.current;
     if (!uid) return;
 
+    // Записываем в Скорбные Анналы (fire-and-forget)
+    if (text.trim() && pScore > 0) {
+      supabase.from("insult_records").insert({
+        insult: text,
+        score: pScore,
+        author_id: uid,
+      }).then();
+    }
+
     // Обновляем счётчики: bot_games всегда, bot_wins только при победе
     const updates: Record<string, unknown> = {};
     if (won) updates.bot_wins = true;     // используем rpc ниже
