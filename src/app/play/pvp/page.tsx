@@ -72,8 +72,10 @@ export default function PvPPage() {
   const ghostTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resolveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownRef  = useRef<ReturnType<typeof setInterval> | null>(null);
-  // ── Bug 1/2 fix: force-resolve stuck games ──
   const stuckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollingRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const resolvingRef  = useRef(false);   // prevents double-resolution in same client
+  const phaseRef      = useRef<Phase>("lobby"); // readable from async callbacks
   const isGhostRef    = useRef(false);
   const ghostScoreRef = useRef(0);
   const ghostInsultRef = useRef("");
@@ -85,12 +87,14 @@ export default function PvPPage() {
   useEffect(() => { gameRef.current = game; }, [game]);
   useEffect(() => { submittedRef.current = submitted; }, [submitted]);
   useEffect(() => { insultRef.current = insult; }, [insult]);
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
 
   const clearAllTimers = useCallback(() => {
     if (ghostTimerRef.current)   { clearTimeout(ghostTimerRef.current);   ghostTimerRef.current   = null; }
     if (resolveTimerRef.current) { clearTimeout(resolveTimerRef.current); resolveTimerRef.current = null; }
     if (countdownRef.current)    { clearInterval(countdownRef.current);   countdownRef.current    = null; }
     if (stuckTimerRef.current)   { clearTimeout(stuckTimerRef.current);   stuckTimerRef.current   = null; }
+    if (pollingRef.current)      { clearInterval(pollingRef.current);     pollingRef.current      = null; }
   }, []);
 
   useEffect(() => {
@@ -107,18 +111,33 @@ export default function PvPPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Bug 1/2: force-resolve if opponent disappeared ────────
+  // ── Force-resolve stuck games (called after 30s timer, and by polling) ──
   const forceResolveIfStuck = useCallback(async () => {
     const g  = gameRef.current;
     const me = profileRef.current;
-    if (!g || !me) return;
+    if (!g || !me || g.id.startsWith("ghost-")) return;
 
     // Fetch fresh state to avoid acting on stale data
     const { data: fresh } = await supabase
       .from("games").select("*").eq("id", g.id).single();
 
-    // Abort if game already resolved or this game is no longer active
-    if (!fresh || fresh.status === "finished" || gameRef.current?.id !== g.id) return;
+    // Abort if this game is no longer the active game
+    if (!fresh || gameRef.current?.id !== g.id) return;
+
+    // If already finished in DB but we missed the result — show it
+    if (fresh.status === "finished") {
+      if (phaseRef.current !== "result") {
+        setGame(fresh as Game);
+        gameRef.current = fresh as Game;
+        // Compute rating delta so the result banner shows ± ОР correctly
+        const isP1 = me.id === fresh.player1_id;
+        const myS  = isP1 ? (fresh.player1_score ?? 0) : (fresh.player2_score ?? 0);
+        const oppS = isP1 ? (fresh.player2_score ?? 0) : (fresh.player1_score ?? 0);
+        setRatingChange(myS > oppS ? WIN_POINTS : oppS > myS ? LOSS_POINTS : 0);
+        setPhase("result");
+      }
+      return;
+    }
 
     const isP1    = me.id === fresh.player1_id;
     const myIns   = isP1 ? fresh.player1_insult : fresh.player2_insult;
@@ -126,12 +145,22 @@ export default function PvPPage() {
     const myField = isP1 ? "player1_insult" : "player2_insult";
     const opField = isP1 ? "player2_insult" : "player1_insult";
 
-    if (oppIns !== null) return; // Opponent did submit — game should resolve via realtime soon
+    // Both submitted but realtime event was missed — resolve directly
+    if (myIns !== null && oppIns !== null) {
+      setGame(fresh as Game);
+      gameRef.current = fresh as Game;
+      resolveGame(fresh as Game);
+      return;
+    }
 
+    // Opponent already submitted, I haven't — my 60s timer handles this; do nothing
+    if (oppIns !== null) return;
+
+    // Opponent hasn't submitted — force empty string for them (and me if needed)
     const updates: Record<string, string> = { [opField]: "" };
-    if (myIns === null) updates[myField] = ""; // also submit empty for me if I haven't
+    if (myIns === null) updates[myField] = "";
 
-    // Use .neq("status","finished") as optimistic lock against double-execution
+    // Optimistic lock: skip if already finished (prevents duplicate writes)
     const { data: updated } = await supabase
       .from("games")
       .update(updates)
@@ -255,8 +284,13 @@ export default function PvPPage() {
     const me = profileRef.current;
     if (!me || !g.player1_insult || !g.player2_insult) return;
 
-    // Clear stuck timer — game is resolving normally
+    // Prevent double-resolution within same client
+    if (resolvingRef.current) return;
+    resolvingRef.current = true;
+
+    // Clear stuck timer and polling — game is resolving
     if (stuckTimerRef.current) { clearTimeout(stuckTimerRef.current); stuckTimerRef.current = null; }
+    if (pollingRef.current)    { clearInterval(pollingRef.current);   pollingRef.current    = null; }
 
     const score1   = scoreInsult(g.player1_insult);
     const score2   = scoreInsult(g.player2_insult);
@@ -355,8 +389,9 @@ export default function PvPPage() {
       setTimerRunning(true);
       subscribeToGame(g.id);
 
-      // ── Bug 1/2 fix: if opponent never submits, force-resolve after 65s ──
-      stuckTimerRef.current = setTimeout(() => forceResolveIfStuck(), 65000);
+      // Force-resolve at 68s — safely after the 60s game timer expires
+      // Handles: opponent disconnects (fills empty string), or both submitted but realtime dropped
+      stuckTimerRef.current = setTimeout(() => forceResolveIfStuck(), 68000);
     }, 1500);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subscribeToGame, forceResolveIfStuck]);
@@ -458,6 +493,70 @@ export default function PvPPage() {
 
   const handleTimerExpire = useCallback(() => submitInsult(""), [submitInsult]);
 
+  // ── Polling fallback: every 5s during real PvP fighting ──────────────────
+  // Checks only for MISSED realtime events — never forces empty submissions.
+  // (Forcing empty for disconnected opponents is handled by stuckTimerRef at 68s.)
+  useEffect(() => {
+    if (phase !== "fighting" || isGhostMatch) return;
+    pollingRef.current = setInterval(async () => {
+      const g  = gameRef.current;
+      const me = profileRef.current;
+      if (!g || !me || g.id.startsWith("ghost-") || phaseRef.current === "result") return;
+
+      const { data: fresh } = await supabase
+        .from("games").select("*").eq("id", g.id).single();
+      if (!fresh || gameRef.current?.id !== g.id) return;
+
+      // Case 1: game finished in DB but we missed the realtime event → show result
+      if (fresh.status === "finished" && phaseRef.current !== "result") {
+        setGame(fresh as Game);
+        gameRef.current = fresh as Game;
+        const isP1 = me.id === fresh.player1_id;
+        const myS  = isP1 ? (fresh.player1_score ?? 0) : (fresh.player2_score ?? 0);
+        const oppS = isP1 ? (fresh.player2_score ?? 0) : (fresh.player1_score ?? 0);
+        setRatingChange(myS > oppS ? WIN_POINTS : oppS > myS ? LOSS_POINTS : 0);
+        if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
+        setPhase("result");
+        return;
+      }
+
+      // Case 2: both submitted, resolution event missed → resolve now
+      if (fresh.player1_insult !== null && fresh.player2_insult !== null && fresh.status !== "finished") {
+        setGame(fresh as Game);
+        gameRef.current = fresh as Game;
+        resolveGame(fresh as Game);
+      }
+      // NOTE: never force empty strings here — stuckTimerRef handles disconnected opponents
+    }, 5000);
+    return () => {
+      if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, isGhostMatch]);
+
+  // ── Reconnect realtime + poll when iOS brings page back to foreground ────
+  useEffect(() => {
+    const onVisible = async () => {
+      if (document.visibilityState !== "visible") return;
+      const g  = gameRef.current;
+      const me = profileRef.current;
+      if (!g || !me || phaseRef.current !== "fighting" || isGhostRef.current) return;
+
+      // Re-subscribe in case the channel silently dropped
+      if (gameChanRef.current) {
+        gameChanRef.current.unsubscribe();
+        gameChanRef.current = null;
+        subscribeToGame(g.id);
+      }
+
+      // Immediately poll for missed state
+      forceResolveIfStuck();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const leaveQueue = async () => {
     const me = profileRef.current;
     if (me) await supabase.from("matchmaking_queue").delete().eq("user_id", me.id);
@@ -474,6 +573,7 @@ export default function PvPPage() {
     gameFoundRef.current = false;
     submittedRef.current = false;
     isGhostRef.current   = false;
+    resolvingRef.current = false;
     insultRef.current    = "";
     gameRef.current      = null; // explicit clear so stuck timer guard works
     setPhase("lobby");

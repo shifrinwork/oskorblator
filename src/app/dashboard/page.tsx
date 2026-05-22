@@ -10,6 +10,15 @@ import Navbar from "@/components/Navbar";
 import type { Profile } from "@/lib/supabase";
 import Image from "next/image";
 
+// ── Featured insult ────────────────────────────────────────────
+type FeaturedInsult = {
+  id: string;
+  insult: string;
+  score: number;
+  likes: number;
+  dislikes: number;
+};
+
 // ── Leaderboard types (shared with /leaderboard page) ─────────
 type Category = "rating" | "games" | "winrate" | "friends";
 type Period   = "week"   | "month" | "alltime";
@@ -39,6 +48,11 @@ function sinceISO(period: Period): string {
 export default function DashboardPage() {
   const [profile, setProfile]   = useState<Profile | null>(null);
   const [loading, setLoading]   = useState(true);
+
+  // Featured insult state
+  const [featured,     setFeatured]     = useState<FeaturedInsult | null>(null);
+  const [featVoting,   setFeatVoting]   = useState(false);
+  const [featVoteDone, setFeatVoteDone] = useState(false);
 
   // Mini leaderboard state
   const [lbCat, setLbCat]       = useState<Category>("rating");
@@ -120,9 +134,41 @@ export default function DashboardPage() {
         setProfile(data);
         setLoading(false);
       });
+      // Загружаем случайное оскорбление для виджета
+      supabase.rpc("get_featured_insult", { uid: user.id }).then(({ data }) => {
+        const row = (data as FeaturedInsult[] | null)?.[0] ?? null;
+        setFeatured(row);
+      });
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── Голосование за featured insult ───────────────────────────
+  const handleFeaturedVote = async (vote: 1 | -1) => {
+    if (!profile || !featured || featVoting || featVoteDone) return;
+    const currentVote = 0; // в виджете показываем только непроголосованные
+    const newVote: 0 | 1 | -1 = currentVote === vote ? 0 : vote;
+    setFeatVoting(true);
+    // Оптимистично обновляем счётчик
+    setFeatured(prev => prev ? {
+      ...prev,
+      likes:    prev.likes    + (newVote === 1  ? 1 : 0),
+      dislikes: prev.dislikes + (newVote === -1 ? 1 : 0),
+    } : prev);
+    try {
+      await supabase.rpc("vote_insult", {
+        p_insult_id: featured.id,
+        p_uid:       profile.id,
+        p_vote:      newVote,
+      });
+    } catch (e) {
+      console.error("vote error:", e);
+    }
+    setFeatVoting(false);
+    setFeatVoteDone(true);
+    // Скрываем виджет через 1.5 с после голосования
+    setTimeout(() => setFeatured(null), 1500);
+  };
 
   if (loading) {
     return (
@@ -206,6 +252,54 @@ export default function DashboardPage() {
             </p>
           )}
         </div>
+
+        {/* ── Виджет «Оскорбление дня» ──────────────────────── */}
+        {featured && (
+          <div className={`rounded-xl border border-pink-800/30 bg-gradient-to-r from-pink-950/20 to-[#0f0f0f] p-4 transition-all duration-500 ${
+            featVoteDone ? "opacity-50" : ""
+          }`}>
+            <div className="flex items-start gap-3">
+              <div className="flex-shrink-0 text-2xl">📜</div>
+              <div className="flex-1 min-w-0">
+                <p className="text-xs text-pink-400 font-bold mb-1 tracking-wide uppercase">
+                  Оскорбление дня · оцени
+                </p>
+                <p className="text-sm text-slate-200 italic leading-relaxed mb-2">
+                  «{featured.insult}»
+                </p>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => handleFeaturedVote(1)}
+                    disabled={featVoting || featVoteDone}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-green-900/30 hover:bg-green-900/60 border border-green-800/30 hover:border-green-700/50 text-green-400 text-sm font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    👍 <span className="tabular-nums">{featured.likes}</span>
+                  </button>
+                  <button
+                    onClick={() => handleFeaturedVote(-1)}
+                    disabled={featVoting || featVoteDone}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-900/30 hover:bg-red-900/60 border border-red-800/30 hover:border-red-700/50 text-red-400 text-sm font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    👎 <span className="tabular-nums">{featured.dislikes}</span>
+                  </button>
+                  {featVoteDone && (
+                    <span className="text-xs text-slate-500">Голос учтён ✓</span>
+                  )}
+                  <Link
+                    href="/annals"
+                    className="ml-auto text-xs text-slate-600 hover:text-orange-400 transition-colors"
+                  >
+                    Все анналы →
+                  </Link>
+                </div>
+              </div>
+              <div className="flex-shrink-0 text-right">
+                <div className="text-xl font-impact text-orange-400 tabular-nums">{featured.score}</div>
+                <div className="text-xs text-slate-600">ЕС</div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Game modes */}
         <div>
