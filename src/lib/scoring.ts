@@ -287,112 +287,155 @@ const EN_WORDS: WordEntry[] = [
 
 const ALL_WORDS = [...RU_WORDS, ...EN_WORDS];
 
-// ── Комбо-категории (бонус за сочетание разных категорий) ────
-const COMBO_BONUS: Record<string, number> = {
-  "mat+intel":       15,
-  "mat+worthless":   18,
-  "mat+appearance":  12,
-  "mat+family":      20,
-  "mat+coward":      14,
-  "intel+worthless": 12,
-  "intel+appearance":10,
-  "worthless+coward":12,
-  "worthless+family":15,
-  "amplifier+mat":   10,
-  "amplifier+intel": 8,
-};
-
-// ── Структурные паттерны (признаки связного оскорбления) ────
-const STRUCTURE_PATTERNS = [
-  { pattern: /ты .{3,}/i,              bonus: 5,  label: "адресовано лично" },
-  { pattern: /как .{3,}/i,             bonus: 7,  label: "сравнение" },
-  { pattern: /словно .{3,}/i,          bonus: 7,  label: "сравнение" },
-  { pattern: /будто .{3,}/i,           bonus: 6,  label: "сравнение" },
-  { pattern: /потому что/i,            bonus: 6,  label: "логическое обоснование" },
-  { pattern: /даже .{3,} не/i,         bonus: 7,  label: "усиление отрицанием" },
-  { pattern: /настолько .{3,} что/i,   bonus: 8,  label: "гиперболизация" },
-  { pattern: /такой .{3,} что/i,       bonus: 8,  label: "гиперболизация" },
-  { pattern: /никогда .{2,}/i,         bonus: 6,  label: "категорическое отрицание" },
-  { pattern: /вся .{2,} твоя/i,        bonus: 6,  label: "обобщение на личность" },
-  { pattern: /твоя .{2,} мать/i,       bonus: 9,  label: "семейный удар" },
-  { pattern: /твой .{2,} отец/i,       bonus: 8,  label: "семейный удар" },
-  { pattern: /даже .{2,} стыдится/i,   bonus: 8,  label: "образный стыд" },
-  { pattern: /даже .{2,} плачет/i,     bonus: 7,  label: "образный плач" },
-  { pattern: /живое доказательство/i,  bonus: 10, label: "философский удар" },
-  { pattern: /от .{2,} до .{2,}/i,     bonus: 7,  label: "диапазон-оскорбление" },
-  { pattern: /[!?]{2,}/,               bonus: 5,  label: "эмоциональный накал" },
-  { pattern: /\.\.\./,                 bonus: 4,  label: "драматическая пауза" },
-];
-
-// ── Главная функция оценки ───────────────────────────────────
+// ── Главная функция оценки v3 ────────────────────────────────
+// Ключевая философия:
+//   • Структура предложения — ГЛАВНЫЙ фактор (до 60 очков)
+//   • Оскорбительность — ВТОРОСТЕПЕННЫЙ фактор (до 35 очков) с сильным убыванием
+//   • Списки матных слов без предложений — штрафуются
+//   • Связный развёрнутый оскорбительный текст — максимальный балл
 export function scoreInsult(insult: string): number {
   if (!insult || insult.trim().length < 2) return 0;
   const text = insult.trim();
   const lower = text.toLowerCase();
 
-  // 1. Находим совпадения со словарём
+  // ── 1. ОСКОРБИТЕЛЬНОСТЬ (0–35 очков) — второстепенный фактор ──
+  // Сильное убывание: первое слово важно, остальные почти не считаются.
+  // Цель: список из 10 матных слов не должен давать больше, чем 1 сильное
+  // слово в структурированном предложении.
   const matched: WordEntry[] = [];
   for (const entry of ALL_WORDS) {
     if (lower.includes(entry.word.toLowerCase())) {
       matched.push(entry);
     }
   }
-
-  // 2. Базовый счёт от найденных слов
-  // Используем топ-5 по силе, остальные как меньший бонус
-  const sorted = [...matched].sort((a, b) => b.score - a.score);
-  let wordScore = 0;
-  sorted.forEach((w, i) => {
-    wordScore += i === 0 ? w.score * 3.5
-      : i === 1 ? w.score * 2.5
-      : i === 2 ? w.score * 1.5
-      : w.score * 0.8;
+  const sortedWords = [...matched].sort((a, b) => b.score - a.score);
+  let offScore = 0;
+  sortedWords.forEach((w, i) => {
+    const mult = i === 0 ? 2.0    // топ-слово: максимальный вес
+               : i === 1 ? 0.8    // второе:  небольшой бонус
+               : i === 2 ? 0.3    // третье:  минимальный
+               :           0.08;  // остальные: почти ноль
+    offScore += w.score * mult;
   });
-  // Нормализуем: максимум ~70 от слов
-  wordScore = Math.min(70, wordScore);
+  offScore = Math.min(35, offScore);
 
-  // 3. Комбо-бонус за сочетание разных категорий
-  const categories = new Set(matched.map(w => w.category));
-  const catArr = Array.from(categories);
-  let comboBonus = 0;
-  for (let i = 0; i < catArr.length; i++) {
-    for (let j = i + 1; j < catArr.length; j++) {
-      const key1 = `${catArr[i]}+${catArr[j]}`;
-      const key2 = `${catArr[j]}+${catArr[i]}`;
-      comboBonus += COMBO_BONUS[key1] ?? COMBO_BONUS[key2] ?? 5;
+  // ── 2. ЛИНГВИСТИЧЕСКАЯ СТРУКТУРА (0–60 очков) — главный фактор ──
+  // Оцениваются признаки грамматически связного предложения:
+  // подлежащее, сказуемое, придаточные обороты, сравнения и т.д.
+  let strScore = 0;
+
+  // 2a. Личное обращение (есть подлежащее / адресат)
+  if (/\b(ты|вы|тебя|тебе|твой|твоя|твоё|твоего|твоему|твоих|ваш|вашу|вашего|вам|вас)\b/i.test(lower) ||
+      /\b(you|your|yours|yourself)\b/i.test(lower)) {
+    strScore += 5;
+  }
+
+  // 2b. Наличие сказуемого (спрягаемый глагол) — самый важный признак предложения
+  //     Намеренно НЕ считаем инфинитивы-восклицания типа "ебать!" или "гореть!"
+  const hasConjugatedVerb = (
+    // 2-е лицо наст. времени (-ешь/-ишь): «говоришь», «идёшь» — очень надёжно
+    /\b[а-яё]{3,}(ешь|ёшь|ишь)\b/i.test(lower) ||
+    // 3-е лицо на -ает/-ует (несёт/-ает/-ует): «делает», «гнушается»
+    /\b[а-яё]{3,}(ает|яет|ует|юет)\b/i.test(lower) ||
+    // Множественное число 3-го лица: «думают», «плачут»
+    /\b[а-яё]{3,}(ают|яют|уют|ют|ят)\b/i.test(lower) ||
+    // Возвратные глаголы (-тся/-ться): «стесняется», «гнушается»
+    /\b[а-яё]{3,}(тся|ться)\b/i.test(lower) ||
+    // Часто употребляемые вспомогательные и смысловые глаголы
+    /\b(является|есть|был|была|было|были|будет|будешь|стал|стала|стали|может|можешь|должен|должна|хочет|хочешь|знает|знаешь|думает|думаешь|плачет|идёт|идёшь|делает|делаешь|говорит|говоришь|имеет|видит|видишь|слышит|несёт|берёт|живёт|рассматривает|считает|падает|смотрит)\b/i.test(lower) ||
+    // Английские глаголы
+    /\b(are|is|was|were|have|has|makes|does|did|look|looks|act|acts|seems|feel|feels|think|thinks)\b/i.test(lower)
+  );
+  if (hasConjugatedVerb) strScore += 10;
+
+  // 2c. Сравнительная конструкция (как / словно / будто / точно)
+  if (/\b(как|словно|будто|точно|подобно)\b.{3,}/i.test(lower)) strScore += 8;
+
+  // 2d. Причинно-следственная связь (потому что / поскольку / ведь)
+  if (/\b(потому что|поскольку|так как|раз уж|ведь|ибо)\b/i.test(lower)) strScore += 7;
+
+  // 2e. Конструкция гиперболы: «настолько/такой ... что»
+  if (/\b(настолько|столь|до такой степени).{2,60}(что|чтобы)\b/i.test(lower)) {
+    strScore += 11;
+  } else if (/\b(такой|такая|такое|такие).{2,60}(что|чтобы)\b/i.test(lower)) {
+    strScore += 9;
+  }
+
+  // 2f. Усилительная частица / категорическое отрицание
+  if (/\b(даже|никогда|ни разу|ни один|нисколько|ни капли)\b/i.test(lower)) strScore += 6;
+
+  // 2g. Семейный удар (персональная атака через родственников)
+  if (/\b(твоя мать|твой отец|твои родители|мамаша|папаша)\b/i.test(lower)) strScore += 8;
+
+  // 2h. Философское / метаобразное наблюдение (высший пилотаж)
+  if (/\b(живое доказательство|живой пример|биологическая ошибка|ошибка природы|ошибка эволюции|квинтэссенция|воплощение|олицетворение)\b/i.test(lower)) {
+    strScore += 10;
+  }
+
+  // 2i. Придаточное определительное (который / чей)
+  if (/\b(который|которая|которое|которые|которого|которому|которым|чей|чья|чьи|чьего)\b/i.test(lower)) {
+    strScore += 6;
+  }
+
+  // 2j. Цепочка прилагательных (два прилагательных подряд)
+  if (/[а-яё]{3,}(ый|ий|ой|ая|яя|ое|ее|ые|ие)\s+[а-яё]{3,}(ый|ий|ой|ая|яя|ое|ее|ые|ие)/i.test(lower)) {
+    strScore += 4;
+  }
+
+  // 2k. Уступительная / условная конструкция
+  if (/\b(хотя|несмотря на|даже если|если бы|при всём)\b/i.test(lower)) strScore += 5;
+
+  // 2l. Диапазон-оскорбление (от ... до)
+  if (/\bот .{2,20} до /i.test(lower)) strScore += 5;
+
+  strScore = Math.min(60, strScore);
+
+  // ── 3. ШТРАФ ЗА СПИСОК СЛОВ (0–25 очков вычитается) ──
+  // Если текст — это просто перечисление матных слов через запятую
+  // без предикативной структуры — штрафуем.
+  const commaCount = (text.match(/,/g) || []).length;
+  let listPenalty = 0;
+  if (commaCount >= 3 && strScore < 22) {
+    // Считаем среднюю длину сегмента между знаками препинания
+    const segs = text.split(/[,;!?]+/).filter(s => s.trim().length > 0);
+    const avgSegLen = segs.reduce((sum, seg) => sum + seg.trim().replace(/\s+/g, " ").length, 0) / segs.length;
+    if (avgSegLen < 15) {
+      // Короткие сегменты + много запятых + слабая структура = список слов
+      listPenalty = Math.min(25, Math.round((commaCount - 2) * 3 + Math.max(0, 13 - avgSegLen) * 1.5));
     }
   }
-  comboBonus = Math.min(30, comboBonus);
 
-  // 4. Структурный бонус за логически связное оскорбление
-  let structureBonus = 0;
-  for (const { pattern, bonus } of STRUCTURE_PATTERNS) {
-    if (pattern.test(text)) structureBonus += bonus;
-  }
-  structureBonus = Math.min(25, structureBonus);
-
-  // 5. Длина текста — небольшой бонус за развёрнутость
+  // ── 4. СТИЛИСТИЧЕСКИЕ БОНУСЫ (0–15 очков) ──
   const len = text.length;
   const lengthBonus = len < 10  ? -5
-    : len < 25  ? 2
-    : len < 80  ? 6
-    : len < 200 ? 8
-    : 5; // слишком длинно — теряет концентрацию
+                    : len < 25  ? 1
+                    : len < 50  ? 3
+                    : len < 150 ? 5
+                    : len < 300 ? 4
+                    : 2; // очень длинный текст теряет концентрацию
 
-  // 6. Полностью КАПС слова — эмоциональный накал
-  const capsWords = text.split(/\s+/).filter(
-    w => w.length > 2 && w === w.toUpperCase() && /[А-ЯA-Z]/.test(w)
-  );
-  const capsBonus = Math.min(12, capsWords.length * 4);
+  // Восклицательные / вопросительные знаки — эмоциональный накал
+  const punctCount = (text.match(/[!?]/g) || []).length;
+  const punctBonus  = Math.min(4, Math.floor(punctCount * 1.5));
 
-  // 7. Детерминированный сдвиг на основе хэша текста (±8)
+  // КАПС-слова: 1–2 слова = акцент, много слов = весь текст в крике
+  const allWords    = text.split(/\s+/);
+  const capsCount   = allWords.filter(w => w.length > 2 && w === w.toUpperCase() && /[А-ЯA-Z]/.test(w)).length;
+  let capsBonus = 0;
+  if (capsCount >= Math.ceil(allWords.length * 0.5) && capsCount >= 3) {
+    capsBonus = 7; // весь текст в КАПСЕ — эпическая подача
+  } else {
+    capsBonus = Math.min(6, capsCount * 2);
+  }
+
+  // ── 5. ДЕТЕРМИНИРОВАННАЯ ДИСПЕРСИЯ (±7) ──
   let hash = 0;
   for (let i = 0; i < text.length; i++) {
     hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
   }
-  const variance = (Math.abs(hash) % 17) - 8;
+  const variance = (Math.abs(hash) % 15) - 7;
 
-  const total = wordScore + comboBonus + structureBonus + lengthBonus + capsBonus + variance;
+  const total = offScore + strScore - listPenalty + lengthBonus + punctBonus + capsBonus + variance;
   return Math.max(1, Math.min(100, Math.round(total)));
 }
 
@@ -401,7 +444,7 @@ export function explainScore(insult: string) {
   const lower = insult.toLowerCase();
   const matched = ALL_WORDS.filter(e => lower.includes(e.word.toLowerCase()));
   const categories = [...new Set(matched.map(w => w.category))];
-  const topWords = [...matched].sort((a, b) => b.score - a.score).slice(0, 5);
+  const topWords   = [...matched].sort((a, b) => b.score - a.score).slice(0, 5);
   return { topWords, categories, score: scoreInsult(insult) };
 }
 
