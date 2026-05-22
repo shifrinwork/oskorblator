@@ -22,19 +22,17 @@ export default function PvPPage() {
   const [submitted, setSubmitted] = useState(false);
   const [ratingChange, setRatingChange] = useState(0);
 
-  // Refs — не протухают в колбэках реалтайма
   const profileRef = useRef<Profile | null>(null);
   const gameFoundRef = useRef(false);
   const gameRef = useRef<Game | null>(null);
   const submittedRef = useRef(false);
   const insultRef = useRef("");
-  const matchmakingChannelRef = useRef<ReturnType<typeof createClient>["channel"] | null>(null);
-  const gameChannelRef = useRef<ReturnType<typeof createClient>["channel"] | null>(null);
+  const matchChanRef = useRef<ReturnType<typeof createClient> | null>(null);
+  const gameChanRef = useRef<ReturnType<typeof createClient> | null>(null);
 
   const router = useRouter();
   const supabase = createClient();
 
-  // Синхронизируем refs со стейтом
   useEffect(() => { profileRef.current = profile; }, [profile]);
   useEffect(() => { gameRef.current = game; }, [game]);
   useEffect(() => { submittedRef.current = submitted; }, [submitted]);
@@ -44,27 +42,27 @@ export default function PvPPage() {
     supabase.auth.getUser().then(({ data: { user } }) => {
       if (!user) { router.push("/login"); return; }
       supabase.from("profiles").select("*").eq("id", user.id).single()
-        .then(({ data }) => {
-          setProfile(data);
-          profileRef.current = data;
-        });
+        .then(({ data }) => { setProfile(data); profileRef.current = data; });
     });
     return () => {
-      matchmakingChannelRef.current?.unsubscribe();
-      gameChannelRef.current?.unsubscribe();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (matchChanRef.current as any)?.unsubscribe();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (gameChanRef.current as any)?.unsubscribe();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const subscribeToGame = useCallback((gameId: string) => {
-    gameChannelRef.current = supabase
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (gameChanRef.current as any) = supabase
       .channel(`game-${gameId}`)
       .on("postgres_changes", {
         event: "UPDATE",
         schema: "public",
         table: "games",
         filter: `id=eq.${gameId}`,
-      }, ({ new: updated }) => {
+      }, ({ new: updated }: { new: unknown }) => {
         const g = updated as Game;
         setGame(g);
         gameRef.current = g;
@@ -76,94 +74,13 @@ export default function PvPPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleGameFound = useCallback(async (g: Game) => {
-    // Защита от двойного вызова
-    if (gameFoundRef.current) return;
-    gameFoundRef.current = true;
-
-    matchmakingChannelRef.current?.unsubscribe();
-
-    setGame(g);
-    gameRef.current = g;
-
-    const me = profileRef.current;
-    const opponentId = g.player1_id === me?.id ? g.player2_id : g.player1_id;
-    if (opponentId) {
-      const { data: opp } = await supabase
-        .from("profiles").select("*").eq("id", opponentId).single();
-      setOpponent(opp);
-    }
-
-    setPhase("fighting");
-    setTimerRunning(true);
-    subscribeToGame(g.id);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [subscribeToGame]);
-
-  const joinMatchmaking = async () => {
-    if (!profileRef.current) return;
-    const me = profileRef.current;
-    gameFoundRef.current = false;
-    setPhase("searching");
-
-    // Чистим стейл-запись если есть
-    await supabase.from("matchmaking_queue").delete().eq("user_id", me.id);
-
-    // Подписываемся на реалтайм ДО вставки в очередь
-    // Слушаем оба варианта: мы можем оказаться player1 ИЛИ player2
-    matchmakingChannelRef.current = supabase
-      .channel(`matchmaking-${me.id}`)
-      .on("postgres_changes", {
-        event: "INSERT",
-        schema: "public",
-        table: "games",
-        filter: `player1_id=eq.${me.id}`,
-      }, ({ new: g }) => handleGameFound(g as Game))
-      .on("postgres_changes", {
-        event: "INSERT",
-        schema: "public",
-        table: "games",
-        filter: `player2_id=eq.${me.id}`,
-      }, ({ new: g }) => handleGameFound(g as Game))
-      .subscribe();
-
-    // Вставляем себя в очередь
-    await supabase.from("matchmaking_queue").insert({ user_id: me.id });
-
-    // Ищем уже ожидающего игрока
-    const { data: queue } = await supabase
-      .from("matchmaking_queue")
-      .select("user_id")
-      .neq("user_id", me.id)
-      .order("created_at", { ascending: true })
-      .limit(1);
-
-    if (queue && queue.length > 0) {
-      const opponentId = queue[0].user_id;
-
-      // Используем RPC — security definer чистит очередь обоих игроков
-      const { data: newGameId, error } = await supabase.rpc("create_pvp_match", {
-        p1_id: opponentId,
-        p2_id: me.id,
-      });
-
-      if (!error && newGameId) {
-        const { data: newGame } = await supabase
-          .from("games").select("*").eq("id", newGameId).single();
-        if (newGame) handleGameFound(newGame as Game);
-      }
-    }
-  };
-
   const resolveGame = useCallback(async (g: Game) => {
     const me = profileRef.current;
     if (!me || !g.player1_insult || !g.player2_insult) return;
 
     const score1 = scoreInsult(g.player1_insult);
     const score2 = scoreInsult(g.player2_insult);
-    const winnerId = score1 > score2 ? g.player1_id
-      : score2 > score1 ? g.player2_id
-      : null;
+    const winnerId = score1 > score2 ? g.player1_id : score2 > score1 ? g.player2_id : null;
 
     await supabase.from("games").update({
       player1_score: score1,
@@ -190,10 +107,76 @@ export default function PvPPage() {
       await supabase.rpc("increment_rating", { uid: theirId, delta: WIN_POINTS });
       await supabase.rpc("increment_wins", { uid: theirId });
     }
-
     setPhase("result");
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const handleGameFound = useCallback(async (g: Game) => {
+    if (gameFoundRef.current) return;
+    gameFoundRef.current = true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (matchChanRef.current as any)?.unsubscribe();
+
+    setGame(g);
+    gameRef.current = g;
+
+    const me = profileRef.current;
+    const opponentId = g.player1_id === me?.id ? g.player2_id : g.player1_id;
+    if (opponentId) {
+      const { data: opp } = await supabase
+        .from("profiles").select("*").eq("id", opponentId).single();
+      setOpponent(opp);
+    }
+    setPhase("fighting");
+    setTimerRunning(true);
+    subscribeToGame(g.id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subscribeToGame]);
+
+  const joinMatchmaking = async () => {
+    const me = profileRef.current;
+    if (!me) return;
+    gameFoundRef.current = false;
+    setPhase("searching");
+
+    await supabase.from("matchmaking_queue").delete().eq("user_id", me.id);
+
+    // Подписка ДО вставки в очередь
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (matchChanRef.current as any) = supabase
+      .channel(`matchmaking-${me.id}`)
+      .on("postgres_changes", {
+        event: "INSERT", schema: "public", table: "games",
+        filter: `player1_id=eq.${me.id}`,
+      }, ({ new: g }: { new: unknown }) => handleGameFound(g as Game))
+      .on("postgres_changes", {
+        event: "INSERT", schema: "public", table: "games",
+        filter: `player2_id=eq.${me.id}`,
+      }, ({ new: g }: { new: unknown }) => handleGameFound(g as Game))
+      .subscribe();
+
+    await supabase.from("matchmaking_queue").insert({ user_id: me.id });
+
+    const { data: queue } = await supabase
+      .from("matchmaking_queue")
+      .select("user_id")
+      .neq("user_id", me.id)
+      .order("created_at", { ascending: true })
+      .limit(1);
+
+    if (queue && queue.length > 0) {
+      const opponentId = queue[0].user_id;
+      const { data: newGameId, error } = await supabase.rpc("create_pvp_match", {
+        p1_id: opponentId,
+        p2_id: me.id,
+      });
+      if (!error && newGameId) {
+        const { data: newGame } = await supabase
+          .from("games").select("*").eq("id", newGameId).single();
+        if (newGame) handleGameFound(newGame as Game);
+      }
+    }
+  };
 
   const submitInsult = useCallback(async (text?: string) => {
     const g = gameRef.current;
@@ -226,7 +209,8 @@ export default function PvPPage() {
   const leaveQueue = async () => {
     const me = profileRef.current;
     if (me) await supabase.from("matchmaking_queue").delete().eq("user_id", me.id);
-    matchmakingChannelRef.current?.unsubscribe();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (matchChanRef.current as any)?.unsubscribe();
     gameFoundRef.current = false;
     setPhase("lobby");
   };
