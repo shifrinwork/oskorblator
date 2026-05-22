@@ -53,20 +53,23 @@ export async function POST(req: NextRequest) {
 
   for (let i = 0; i < records.length; i += BATCH_SIZE) {
     const batch = records.slice(i, i + BATCH_SIZE);
-    const upserts = batch.map(r => ({
-      id:    r.id,
-      score: scoreInsult(r.insult as string),
-    }));
 
-    const { error: upsertErr } = await supabase
-      .from("insult_records")
-      .upsert(upserts, { onConflict: "id" });
+    const results = await Promise.all(
+      batch.map(r =>
+        supabase
+          .from("insult_records")
+          .update({ score: scoreInsult(r.insult as string) })
+          .eq("id", r.id)
+      )
+    );
 
-    if (upsertErr) {
-      console.error("rescore batch error:", upsertErr);
-      errors += batch.length;
-    } else {
-      updated += batch.length;
+    for (const { error } of results) {
+      if (error) {
+        console.error("rescore error:", error);
+        errors++;
+      } else {
+        updated++;
+      }
     }
   }
 
