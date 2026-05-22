@@ -43,6 +43,9 @@ export default function Navbar() {
               <Link href="/leaderboard" className="text-sm text-slate-400 hover:text-orange-400 transition-colors hidden sm:block">
                 Рейтинг
               </Link>
+              <Link href="/profile" className="text-sm text-slate-400 hover:text-orange-400 transition-colors hidden sm:block">
+                Профиль
+              </Link>
               <Link href="/dashboard" className="flex items-center gap-2 text-sm">
                 {profile.avatar_url ? (
                   <Image

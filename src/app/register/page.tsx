@@ -1,7 +1,7 @@
 "use client";
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase";
 import DisclaimerModal from "@/components/DisclaimerModal";
 
@@ -14,9 +14,16 @@ export default function RegisterPage() {
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [refCode, setRefCode] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
+  const searchParams = useSearchParams();
   const supabase = createClient();
+
+  useEffect(() => {
+    const ref = searchParams.get("ref");
+    if (ref) setRefCode(ref);
+  }, [searchParams]);
 
   const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -95,6 +102,19 @@ export default function RegisterPage() {
           .eq("id", userId);
       }
 
+      // Обрабатываем реферальный код
+      if (refCode) {
+        const { data: referrerId } = await supabase.rpc("get_profile_by_ref_code", {
+          code: refCode,
+        });
+        if (referrerId && referrerId !== userId) {
+          await supabase.from("referrals").insert({
+            referrer_id: referrerId,
+            referred_id: userId,
+          });
+        }
+      }
+
       router.push("/dashboard");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Что-то пошло не так";
@@ -123,6 +143,9 @@ export default function RegisterPage() {
             ОСКОРБЛЯТОР
           </Link>
           <p className="text-slate-500 mt-2 text-sm">Создай свой аккаунт бойца</p>
+          {refCode && (
+            <p className="text-xs text-amber-400 mt-1">🎉 Ты пришёл по реферальной ссылке!</p>
+          )}
         </div>
 
         <div className="rounded-xl border border-[#1e1e1e] bg-[#0f0f0f] p-6">
