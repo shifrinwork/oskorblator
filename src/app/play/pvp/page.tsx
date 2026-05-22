@@ -507,8 +507,11 @@ export default function PvPPage() {
         .from("games").select("*").eq("id", g.id).single();
       if (!fresh || gameRef.current?.id !== g.id) return;
 
+      // Перечитываем фазу после await — она могла измениться пока ждали запрос
+      const phaseNow = phaseRef.current as Phase;
+
       // Case 1: game finished in DB but we missed the realtime event → show result
-      if (fresh.status === "finished" && phaseRef.current !== "result") {
+      if (fresh.status === "finished" && phaseNow !== "result") {
         setGame(fresh as Game);
         gameRef.current = fresh as Game;
         const isP1 = me.id === fresh.player1_id;
