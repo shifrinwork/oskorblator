@@ -146,20 +146,19 @@ export default function DashboardPage() {
   // ── Голосование за featured insult ───────────────────────────
   const handleFeaturedVote = async (vote: 1 | -1) => {
     if (!profile || !featured || featVoting || featVoteDone) return;
-    const currentVote = 0; // в виджете показываем только непроголосованные
-    const newVote: 0 | 1 | -1 = currentVote === vote ? 0 : vote;
+    // Виджет показывается только непроголосованным — голос всегда первый
     setFeatVoting(true);
     // Оптимистично обновляем счётчик
     setFeatured(prev => prev ? {
       ...prev,
-      likes:    prev.likes    + (newVote === 1  ? 1 : 0),
-      dislikes: prev.dislikes + (newVote === -1 ? 1 : 0),
+      likes:    prev.likes    + (vote === 1  ? 1 : 0),
+      dislikes: prev.dislikes + (vote === -1 ? 1 : 0),
     } : prev);
     try {
       await supabase.rpc("vote_insult", {
         p_insult_id: featured.id,
         p_uid:       profile.id,
-        p_vote:      newVote,
+        p_vote:      vote,
       });
     } catch (e) {
       console.error("vote error:", e);
