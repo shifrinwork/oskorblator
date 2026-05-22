@@ -8,8 +8,8 @@ import DisclaimerModal from "@/components/DisclaimerModal";
 export default function RegisterPage() {
   const [step, setStep] = useState<"disclaimer" | "form">("disclaimer");
   const [username, setUsername] = useState("");
-  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [email, setEmail] = useState("");
   const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -33,11 +33,13 @@ export default function RegisterPage() {
     setLoading(true);
 
     try {
-      // Check username availability
+      const cleanUsername = username.trim();
+
+      // Проверяем доступность ника
       const { data: existing } = await supabase
         .from("profiles")
         .select("id")
-        .eq("username", username.trim())
+        .eq("username", cleanUsername)
         .maybeSingle();
 
       if (existing) {
@@ -45,14 +47,22 @@ export default function RegisterPage() {
         return;
       }
 
-      let avatarUrl: string | null = null;
+      // Если email не введён — генерируем технический адрес
+      // (Supabase требует email, но пользователь его не видит)
+      const rand = Math.random().toString(36).slice(2, 8);
+      const authEmail = email.trim()
+        ? email.trim()
+        : `${cleanUsername.toLowerCase()}.${rand}@oskorblator.noemail`;
 
-      // Sign up
       const { data: authData, error: signUpError } = await supabase.auth.signUp({
-        email,
+        email: authEmail,
         password,
         options: {
-          data: { username: username.trim() },
+          data: {
+            username: cleanUsername,
+            // Флаг — использовал ли реальный email
+            has_real_email: !!email.trim(),
+          },
         },
       });
 
@@ -61,8 +71,9 @@ export default function RegisterPage() {
       const userId = authData.user?.id;
       if (!userId) throw new Error("Ошибка создания аккаунта");
 
-      // Upload avatar if provided
-      if (avatarFile && userId) {
+      // Загрузка аватарки
+      let avatarUrl: string | null = null;
+      if (avatarFile) {
         const ext = avatarFile.name.split(".").pop();
         const path = `${userId}/avatar.${ext}`;
         const { error: uploadError } = await supabase.storage
@@ -77,7 +88,6 @@ export default function RegisterPage() {
         }
       }
 
-      // Update profile with avatar if uploaded
       if (avatarUrl) {
         await supabase
           .from("profiles")
@@ -87,7 +97,15 @@ export default function RegisterPage() {
 
       router.push("/dashboard");
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Что-то пошло не так");
+      const msg = err instanceof Error ? err.message : "Что-то пошло не так";
+      // Переводим типичные ошибки Supabase на русский
+      if (msg.includes("already registered")) {
+        setError("Этот email уже используется.");
+      } else if (msg.includes("Password should be")) {
+        setError("Пароль слишком короткий — минимум 6 символов.");
+      } else {
+        setError(msg);
+      }
     } finally {
       setLoading(false);
     }
@@ -109,7 +127,8 @@ export default function RegisterPage() {
 
         <div className="rounded-xl border border-[#1e1e1e] bg-[#0f0f0f] p-6">
           <form onSubmit={handleSubmit} className="space-y-4">
-            {/* Avatar */}
+
+            {/* Аватарка */}
             <div className="flex flex-col items-center gap-3">
               <button
                 type="button"
@@ -124,7 +143,7 @@ export default function RegisterPage() {
                 )}
               </button>
               <p className="text-xs text-slate-600">
-                {avatarPreview ? "Нажми чтобы сменить" : "Добавить аватарку (не обязательно)"}
+                {avatarPreview ? "Нажми чтобы сменить" : "Аватарка (не обязательно)"}
               </p>
               <input
                 ref={fileInputRef}
@@ -135,7 +154,7 @@ export default function RegisterPage() {
               />
             </div>
 
-            {/* Username */}
+            {/* Ник */}
             <div>
               <label className="block text-sm text-slate-400 mb-1.5">
                 Боевой ник <span className="text-orange-500">*</span>
@@ -152,23 +171,7 @@ export default function RegisterPage() {
               />
             </div>
 
-            {/* Email */}
-            <div>
-              <label className="block text-sm text-slate-400 mb-1.5">
-                Email <span className="text-orange-500">*</span>{" "}
-                <span className="text-xs text-slate-600">(для восстановления пароля)</span>
-              </label>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="bойец@mail.ru"
-                required
-                className="w-full px-3 py-2.5 rounded-lg bg-[#0a0a0a] border border-[#2e2e2e] focus:border-orange-500 focus:outline-none text-slate-200 text-sm transition-colors"
-              />
-            </div>
-
-            {/* Password */}
+            {/* Пароль */}
             <div>
               <label className="block text-sm text-slate-400 mb-1.5">
                 Пароль <span className="text-orange-500">*</span>
@@ -197,6 +200,29 @@ export default function RegisterPage() {
             >
               {loading ? "Создаём аккаунт..." : "Вступить в битву 🔥"}
             </button>
+
+            {/* Email — необязательный, внизу */}
+            <div className="pt-2 border-t border-[#1e1e1e]">
+              <label className="block text-sm text-slate-600 mb-1.5">
+                Email{" "}
+                <span className="text-xs text-slate-700">
+                  — не обязателен, только для восстановления пароля
+                </span>
+              </label>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="твой@email.ru (необязательно)"
+                className="w-full px-3 py-2.5 rounded-lg bg-[#0a0a0a] border border-[#2e2e2e] focus:border-slate-500 focus:outline-none text-slate-400 text-sm transition-colors placeholder:text-slate-700"
+              />
+              {!email && (
+                <p className="text-xs text-slate-700 mt-1">
+                  ⚠️ Без email восстановить пароль будет невозможно
+                </p>
+              )}
+            </div>
+
           </form>
 
           <p className="text-center text-sm text-slate-600 mt-4">
