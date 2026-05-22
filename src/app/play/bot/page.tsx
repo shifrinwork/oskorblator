@@ -1,10 +1,11 @@
 "use client";
 export const dynamic = "force-dynamic";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase";
 import { scoreInsult, getBotInsult } from "@/lib/scoring";
+import { checkAndUpdateAchievements } from "@/lib/achievements";
 import Timer from "@/components/Timer";
 import Navbar from "@/components/Navbar";
 
@@ -17,36 +18,90 @@ export default function BotGamePage() {
   const [botInsult, setBotInsult] = useState("");
   const [botScore, setBotScore] = useState(0);
   const [timerRunning, setTimerRunning] = useState(false);
-  const [userId, setUserId] = useState<string | null>(null);
+  const [newAchievements, setNewAchievements] = useState<string[]>([]);
+  const userIdRef = useRef<string | null>(null);
+  const insultRef = useRef("");
   const router = useRouter();
   const supabase = createClient();
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data: { user } }) => {
       if (!user) { router.push("/login"); return; }
-      setUserId(user.id);
+      userIdRef.current = user.id;
     });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const startFight = () => {
     setInsult("");
+    insultRef.current = "";
+    setNewAchievements([]);
     setPhase("fighting");
     setTimerRunning(true);
   };
 
-  const finishFight = useCallback((submittedInsult?: string) => {
+  const finishFight = useCallback(async (submittedInsult?: string) => {
     setTimerRunning(false);
-    const text = submittedInsult ?? insult;
+    const text = submittedInsult ?? insultRef.current;
     const pScore = scoreInsult(text);
     const bot = getBotInsult(pScore);
+    const won = pScore > bot.score;
+
     setPlayerScore(pScore);
     setBotInsult(bot.text);
     setBotScore(bot.score);
     setPhase("result");
-  }, [insult]);
+
+    // ── Сохраняем результат в БД ──────────────────────────
+    const uid = userIdRef.current;
+    if (!uid) return;
+
+    // Обновляем счётчики: bot_games всегда, bot_wins только при победе
+    const updates: Record<string, unknown> = {};
+    if (won) updates.bot_wins = true;     // используем rpc ниже
+
+    await supabase.rpc("update_streak", { uid });
+
+    // Инкремент bot_games
+    await supabase.rpc("increment_bot_games", { uid });
+
+    // Инкремент bot_wins если победа
+    if (won) {
+      await supabase.rpc("increment_bot_wins", { uid });
+    }
+
+    // Обновляем max_insult_score если побили рекорд
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("max_insult_score, bot_wins, bot_games, streak_days, wins, losses, pvp_wins")
+      .eq("id", uid)
+      .single();
+
+    if (profile && pScore > (profile.max_insult_score ?? 0)) {
+      await supabase
+        .from("profiles")
+        .update({ max_insult_score: pScore })
+        .eq("id", uid);
+    }
+
+    // Проверяем достижения
+    const { data: refCount } = await supabase.rpc("get_referral_count", { uid });
+    const stats = {
+      total_games: (profile?.wins ?? 0) + (profile?.losses ?? 0) + ((profile?.bot_games ?? 0) + 1),
+      pvp_wins: profile?.pvp_wins ?? 0,
+      bot_wins: (profile?.bot_wins ?? 0) + (won ? 1 : 0),
+      max_insult_score: Math.max(pScore, profile?.max_insult_score ?? 0),
+      streak_days: profile?.streak_days ?? 1,
+      referral_count: (refCount as number) ?? 0,
+    };
+
+    const unlocked = await checkAndUpdateAchievements(supabase, uid, stats);
+    if (unlocked.length > 0) setNewAchievements(unlocked);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleTimerExpire = useCallback(() => {
-    finishFight();
+    finishFight("");
   }, [finishFight]);
 
   const handleSubmit = (e: React.FormEvent) => {
