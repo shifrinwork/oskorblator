@@ -11,7 +11,7 @@ import type { Profile } from "@/lib/supabase";
 import Image from "next/image";
 
 // ── Leaderboard types (shared with /leaderboard page) ─────────
-type Category = "rating" | "games" | "referrals";
+type Category = "rating" | "games" | "winrate" | "friends";
 type Period   = "week"   | "month" | "alltime";
 
 type LbRow = {
@@ -25,6 +25,7 @@ type LbRow = {
   game_count?: number;
   win_count?: number;
   ref_count?: number;
+  winrate?: number;
 };
 
 function sinceISO(period: Period): string {
@@ -53,7 +54,8 @@ export default function DashboardPage() {
     setLbLoading(true);
     let data: LbRow[] = [];
     try {
-      if (category === "rating" && period === "alltime") {
+      if (category === "rating") {
+        // Рейтинг всегда за все время
         const { data: d } = await supabase
           .from("profiles")
           .select("id, username, avatar_url, rating, wins, losses")
@@ -68,25 +70,31 @@ export default function DashboardPage() {
         const { data: d } = await supabase.rpc("lb_top_games", { lim: 5 });
         data = (d ?? []) as LbRow[];
 
-      } else if (category === "referrals" && period === "alltime") {
+      } else if (category === "games") {
+        const { data: d } = await supabase.rpc("lb_games_since", {
+          since: sinceISO(period), lim: 5,
+        });
+        data = (d ?? []) as LbRow[];
+
+      } else if (category === "winrate" && period === "alltime") {
+        const { data: d } = await supabase.rpc("lb_winrate_all", { lim: 5 });
+        data = (d ?? []) as LbRow[];
+
+      } else if (category === "winrate") {
+        const { data: d } = await supabase.rpc("lb_winrate_since", {
+          since: sinceISO(period), lim: 5,
+        });
+        data = (d ?? []) as LbRow[];
+
+      } else if (category === "friends" && period === "alltime") {
         const { data: d } = await supabase.rpc("lb_top_referrals", { lim: 5 });
         data = (d ?? []) as LbRow[];
 
-      } else if (category === "referrals") {
+      } else if (category === "friends") {
         const { data: d } = await supabase.rpc("lb_referrals_since", {
           since: sinceISO(period), lim: 5,
         });
         data = (d ?? []) as LbRow[];
-
-      } else {
-        const { data: d } = await supabase.rpc("lb_games_since", {
-          since: sinceISO(period), lim: 5,
-        });
-        let r = (d ?? []) as LbRow[];
-        if (category === "rating") {
-          r = [...r].sort((a, b) => (Number(b.win_count) || 0) - (Number(a.win_count) || 0));
-        }
-        data = r;
       }
     } catch (e) {
       console.error("mini-lb fetch:", e);
@@ -95,6 +103,12 @@ export default function DashboardPage() {
     setLbLoading(false);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // При переключении на «По рейтингу» — сбрасываем период
+  const handleLbCat = (newCat: Category) => {
+    if (newCat === "rating") setLbPer("alltime");
+    setLbCat(newCat);
+  };
 
   useEffect(() => { loadMini(lbCat, lbPer); }, [lbCat, lbPer, loadMini]);
 
@@ -125,18 +139,18 @@ export default function DashboardPage() {
     : 0;
 
   // ── Mini-leaderboard helpers ───────────────────────────────
-  function getMiniMetric(row: LbRow): number {
-    if (lbCat === "referrals")                        return Number(row.ref_count)   || 0;
-    if (lbCat === "rating" && lbPer !== "alltime")    return Number(row.win_count)   || 0;
-    if (lbCat === "games"  && lbPer === "alltime")    return Number(row.total_games) || 0;
-    if (lbCat === "games")                            return Number(row.game_count)  || 0;
-    return row.rating;
+  function getMiniMetric(row: LbRow): string {
+    if (lbCat === "friends") return String(Number(row.ref_count) || 0);
+    if (lbCat === "winrate") return `${Number(row.winrate ?? 0).toFixed(1)}%`;
+    if (lbCat === "games" && lbPer === "alltime") return String(Number(row.total_games) || 0);
+    if (lbCat === "games") return String(Number(row.game_count) || 0);
+    return String(row.rating); // rating, always alltime
   }
 
-  const metricSuffix =
-    lbCat === "referrals"                  ? " 👥" :
-    lbCat === "rating" && lbPer !== "alltime" ? " 🏆" :
-    lbCat === "games"                      ? " 🎮" : " ОР";
+  const metricLabel =
+    lbCat === "friends" ? "👥" :
+    lbCat === "winrate" ? "%" :
+    lbCat === "games"   ? "🎮" : "ОР";
 
   const medals = ["text-amber-400", "text-slate-400", "text-orange-700"];
 
@@ -241,13 +255,14 @@ export default function DashboardPage() {
             </div>
             <div className="flex gap-1 flex-wrap">
               {([
-                { id: "rating"    as const, label: "⚡ Рейтинг"  },
-                { id: "games"     as const, label: "🎮 Игры"     },
-                { id: "referrals" as const, label: "👥 Реферал." },
+                { id: "rating"  as const, label: "⚡ Рейтинг" },
+                { id: "games"   as const, label: "🎮 Игры"    },
+                { id: "winrate" as const, label: "🏆 Винрейт" },
+                { id: "friends" as const, label: "👥 Друзья"  },
               ]).map(({ id, label }) => (
                 <button
                   key={id}
-                  onClick={() => setLbCat(id)}
+                  onClick={() => handleLbCat(id)}
                   className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
                     lbCat === id
                       ? "bg-orange-600 text-white"
@@ -260,26 +275,28 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* Period tabs */}
-          <div className="flex gap-1 mb-4">
-            {([
-              { id: "week"    as const, label: "Неделя"    },
-              { id: "month"   as const, label: "Месяц"     },
-              { id: "alltime" as const, label: "Всё время" },
-            ]).map(({ id, label }) => (
-              <button
-                key={id}
-                onClick={() => setLbPer(id)}
-                className={`px-2.5 py-0.5 rounded text-xs transition-colors ${
-                  lbPer === id
-                    ? "bg-[#2e2e2e] text-slate-200"
-                    : "text-slate-600 hover:text-slate-400"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+          {/* Period tabs — скрыты для «По рейтингу» */}
+          {lbCat !== "rating" && (
+            <div className="flex gap-1 mb-4">
+              {([
+                { id: "week"    as const, label: "Неделя"    },
+                { id: "month"   as const, label: "Месяц"     },
+                { id: "alltime" as const, label: "Всё время" },
+              ]).map(({ id, label }) => (
+                <button
+                  key={id}
+                  onClick={() => setLbPer(id)}
+                  className={`px-2.5 py-0.5 rounded text-xs transition-colors ${
+                    lbPer === id
+                      ? "bg-[#2e2e2e] text-slate-200"
+                      : "text-slate-600 hover:text-slate-400"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
 
           {/* Rows */}
           {lbLoading ? (
@@ -298,19 +315,40 @@ export default function DashboardPage() {
                     key={row.uid}
                     className="flex items-center gap-3 py-2 border-b border-[#1e1e1e] last:border-0"
                   >
-                    <span className={`w-5 text-center text-sm font-bold ${
-                      medals[i] ?? "text-slate-600"
-                    }`}>
+                    <span className={`w-5 text-center text-sm font-bold ${medals[i] ?? "text-slate-600"}`}>
                       {i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : i + 1}
                     </span>
                     <span className="flex-1 text-sm text-slate-300 truncate">{row.username}</span>
                     <span className={`text-xs ${r.color} hidden sm:inline`}>{r.emoji} {r.name}</span>
                     <span className="text-sm font-bold text-orange-400 tabular-nums">
-                      {metric}<span className="text-xs font-normal text-slate-500">{metricSuffix}</span>
+                      {metric}
+                      {lbCat !== "winrate" && (
+                        <span className="text-xs font-normal text-slate-500 ml-0.5">{metricLabel}</span>
+                      )}
                     </span>
                   </div>
                 );
               })}
+            </div>
+          )}
+
+          {/* Реферальная ссылка под строками «По друзьям» */}
+          {lbCat === "friends" && !lbLoading && profile.referral_code && (
+            <div className="mt-3 pt-3 border-t border-[#1e1e1e]">
+              <p className="text-xs text-slate-600 mb-1.5">👥 Твоя реферальная ссылка:</p>
+              <div className="flex gap-2">
+                <code className="flex-1 text-xs text-orange-400 font-mono truncate bg-[#0a0a0a] px-2.5 py-1.5 rounded border border-[#2e2e2e]">
+                  {`${window.location.origin}/register?ref=${profile.referral_code}`}
+                </code>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(`${window.location.origin}/register?ref=${profile.referral_code}`);
+                  }}
+                  className="flex-shrink-0 px-2.5 py-1.5 rounded bg-orange-600/80 hover:bg-orange-600 text-xs font-bold transition-colors"
+                >
+                  Копировать
+                </button>
+              </div>
             </div>
           )}
         </div>
