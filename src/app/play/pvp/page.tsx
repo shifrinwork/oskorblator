@@ -9,6 +9,7 @@ import { WIN_POINTS, LOSS_POINTS } from "@/lib/ranks";
 import Timer from "@/components/Timer";
 import Navbar from "@/components/Navbar";
 import type { Profile, Game } from "@/lib/supabase";
+import type { RealtimeChannel } from "@supabase/supabase-js";
 
 type Phase = "lobby" | "searching" | "fighting" | "result";
 
@@ -27,8 +28,8 @@ export default function PvPPage() {
   const gameRef = useRef<Game | null>(null);
   const submittedRef = useRef(false);
   const insultRef = useRef("");
-  const matchChanRef = useRef<ReturnType<typeof createClient> | null>(null);
-  const gameChanRef = useRef<ReturnType<typeof createClient> | null>(null);
+  const matchChanRef = useRef<RealtimeChannel | null>(null);
+  const gameChanRef = useRef<RealtimeChannel | null>(null);
 
   const router = useRouter();
   const supabase = createClient();
@@ -44,32 +45,30 @@ export default function PvPPage() {
       supabase.from("profiles").select("*").eq("id", user.id).single()
         .then(({ data }) => { setProfile(data); profileRef.current = data; });
     });
+    const matchChan = matchChanRef.current;
+    const gameChan = gameChanRef.current;
     return () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (matchChanRef.current as any)?.unsubscribe();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (gameChanRef.current as any)?.unsubscribe();
+      matchChan?.unsubscribe();
+      gameChan?.unsubscribe();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const subscribeToGame = useCallback((gameId: string) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (gameChanRef.current as any) = supabase
+    gameChanRef.current = supabase
       .channel(`game-${gameId}`)
-      .on("postgres_changes", {
-        event: "UPDATE",
-        schema: "public",
-        table: "games",
-        filter: `id=eq.${gameId}`,
-      }, ({ new: updated }: { new: unknown }) => {
-        const g = updated as Game;
-        setGame(g);
-        gameRef.current = g;
-        if (g.player1_insult !== null && g.player2_insult !== null && g.status !== "finished") {
-          resolveGame(g);
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "games", filter: `id=eq.${gameId}` },
+        ({ new: updated }: { new: unknown }) => {
+          const g = updated as Game;
+          setGame(g);
+          gameRef.current = g;
+          if (g.player1_insult !== null && g.player2_insult !== null && g.status !== "finished") {
+            resolveGame(g);
+          }
         }
-      })
+      )
       .subscribe();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -114,8 +113,7 @@ export default function PvPPage() {
   const handleGameFound = useCallback(async (g: Game) => {
     if (gameFoundRef.current) return;
     gameFoundRef.current = true;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (matchChanRef.current as any)?.unsubscribe();
+    matchChanRef.current?.unsubscribe();
 
     setGame(g);
     gameRef.current = g;
@@ -141,18 +139,18 @@ export default function PvPPage() {
 
     await supabase.from("matchmaking_queue").delete().eq("user_id", me.id);
 
-    // Подписка ДО вставки в очередь
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (matchChanRef.current as any) = supabase
+    matchChanRef.current = supabase
       .channel(`matchmaking-${me.id}`)
-      .on("postgres_changes", {
-        event: "INSERT", schema: "public", table: "games",
-        filter: `player1_id=eq.${me.id}`,
-      }, ({ new: g }: { new: unknown }) => handleGameFound(g as Game))
-      .on("postgres_changes", {
-        event: "INSERT", schema: "public", table: "games",
-        filter: `player2_id=eq.${me.id}`,
-      }, ({ new: g }: { new: unknown }) => handleGameFound(g as Game))
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "games", filter: `player1_id=eq.${me.id}` },
+        ({ new: g }: { new: unknown }) => handleGameFound(g as Game)
+      )
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "games", filter: `player2_id=eq.${me.id}` },
+        ({ new: g }: { new: unknown }) => handleGameFound(g as Game)
+      )
       .subscribe();
 
     await supabase.from("matchmaking_queue").insert({ user_id: me.id });
@@ -209,8 +207,7 @@ export default function PvPPage() {
   const leaveQueue = async () => {
     const me = profileRef.current;
     if (me) await supabase.from("matchmaking_queue").delete().eq("user_id", me.id);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (matchChanRef.current as any)?.unsubscribe();
+    matchChanRef.current?.unsubscribe();
     gameFoundRef.current = false;
     setPhase("lobby");
   };
