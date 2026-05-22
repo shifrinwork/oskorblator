@@ -21,100 +21,44 @@ export default function PvPPage() {
   const [timerRunning, setTimerRunning] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [ratingChange, setRatingChange] = useState(0);
+
+  // Refs — не протухают в колбэках реалтайма
+  const profileRef = useRef<Profile | null>(null);
+  const gameFoundRef = useRef(false);
+  const gameRef = useRef<Game | null>(null);
+  const submittedRef = useRef(false);
+  const insultRef = useRef("");
+  const matchmakingChannelRef = useRef<ReturnType<typeof createClient>["channel"] | null>(null);
+  const gameChannelRef = useRef<ReturnType<typeof createClient>["channel"] | null>(null);
+
   const router = useRouter();
   const supabase = createClient();
-  const gameSubscriptionRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
-  const matchmakingRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+
+  // Синхронизируем refs со стейтом
+  useEffect(() => { profileRef.current = profile; }, [profile]);
+  useEffect(() => { gameRef.current = game; }, [game]);
+  useEffect(() => { submittedRef.current = submitted; }, [submitted]);
+  useEffect(() => { insultRef.current = insult; }, [insult]);
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data: { user } }) => {
       if (!user) { router.push("/login"); return; }
-      supabase.from("profiles").select("*").eq("id", user.id).single().then(({ data }) => setProfile(data));
+      supabase.from("profiles").select("*").eq("id", user.id).single()
+        .then(({ data }) => {
+          setProfile(data);
+          profileRef.current = data;
+        });
     });
     return () => {
-      gameSubscriptionRef.current?.unsubscribe();
-      matchmakingRef.current?.unsubscribe();
+      matchmakingChannelRef.current?.unsubscribe();
+      gameChannelRef.current?.unsubscribe();
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const joinMatchmaking = async () => {
-    if (!profile) return;
-    setPhase("searching");
-
-    // Remove stale entry if any
-    await supabase.from("matchmaking_queue").delete().eq("user_id", profile.id);
-
-    // Insert into queue
-    await supabase.from("matchmaking_queue").insert({ user_id: profile.id });
-
-    // Listen for match: watch games where we are player2 (someone accepted our challenge or we were matched)
-    matchmakingRef.current = supabase
-      .channel("matchmaking")
-      .on("postgres_changes", {
-        event: "INSERT",
-        schema: "public",
-        table: "games",
-        filter: `player2_id=eq.${profile.id}`,
-      }, ({ new: g }) => {
-        handleGameFound(g as Game);
-      })
-      .on("postgres_changes", {
-        event: "UPDATE",
-        schema: "public",
-        table: "games",
-        filter: `player1_id=eq.${profile.id}`,
-      }, ({ new: g }) => {
-        if ((g as Game).status === "active" && phase === "searching") {
-          handleGameFound(g as Game);
-        }
-      })
-      .subscribe();
-
-    // Try to find existing waiting player
-    const { data: queueEntries } = await supabase
-      .from("matchmaking_queue")
-      .select("user_id, profiles(*)")
-      .neq("user_id", profile.id)
-      .order("created_at", { ascending: true })
-      .limit(1);
-
-    if (queueEntries && queueEntries.length > 0) {
-      const opponentId = queueEntries[0].user_id;
-
-      // Create game
-      const { data: newGame } = await supabase
-        .from("games")
-        .insert({
-          mode: "pvp",
-          status: "active",
-          player1_id: opponentId,
-          player2_id: profile.id,
-        })
-        .select()
-        .single();
-
-      // Remove both from queue
-      await supabase.from("matchmaking_queue").delete().in("user_id", [profile.id, opponentId]);
-
-      if (newGame) handleGameFound(newGame as Game);
-    }
-  };
-
-  const handleGameFound = async (g: Game) => {
-    setGame(g);
-    const opponentId = g.player1_id === profile?.id ? g.player2_id : g.player1_id;
-    if (opponentId) {
-      const { data: opp } = await supabase.from("profiles").select("*").eq("id", opponentId).single();
-      setOpponent(opp);
-    }
-    setPhase("fighting");
-    setTimerRunning(true);
-    subscribeToGame(g.id);
-  };
-
-  const subscribeToGame = (gameId: string) => {
-    gameSubscriptionRef.current = supabase
-      .channel(`game:${gameId}`)
+  const subscribeToGame = useCallback((gameId: string) => {
+    gameChannelRef.current = supabase
+      .channel(`game-${gameId}`)
       .on("postgres_changes", {
         event: "UPDATE",
         schema: "public",
@@ -123,23 +67,103 @@ export default function PvPPage() {
       }, ({ new: updated }) => {
         const g = updated as Game;
         setGame(g);
-        // Both submitted — show results
+        gameRef.current = g;
         if (g.player1_insult !== null && g.player2_insult !== null && g.status !== "finished") {
           resolveGame(g);
         }
-        if (g.status === "finished") {
-          setPhase("result");
-        }
       })
       .subscribe();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleGameFound = useCallback(async (g: Game) => {
+    // Защита от двойного вызова
+    if (gameFoundRef.current) return;
+    gameFoundRef.current = true;
+
+    matchmakingChannelRef.current?.unsubscribe();
+
+    setGame(g);
+    gameRef.current = g;
+
+    const me = profileRef.current;
+    const opponentId = g.player1_id === me?.id ? g.player2_id : g.player1_id;
+    if (opponentId) {
+      const { data: opp } = await supabase
+        .from("profiles").select("*").eq("id", opponentId).single();
+      setOpponent(opp);
+    }
+
+    setPhase("fighting");
+    setTimerRunning(true);
+    subscribeToGame(g.id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subscribeToGame]);
+
+  const joinMatchmaking = async () => {
+    if (!profileRef.current) return;
+    const me = profileRef.current;
+    gameFoundRef.current = false;
+    setPhase("searching");
+
+    // Чистим стейл-запись если есть
+    await supabase.from("matchmaking_queue").delete().eq("user_id", me.id);
+
+    // Подписываемся на реалтайм ДО вставки в очередь
+    // Слушаем оба варианта: мы можем оказаться player1 ИЛИ player2
+    matchmakingChannelRef.current = supabase
+      .channel(`matchmaking-${me.id}`)
+      .on("postgres_changes", {
+        event: "INSERT",
+        schema: "public",
+        table: "games",
+        filter: `player1_id=eq.${me.id}`,
+      }, ({ new: g }) => handleGameFound(g as Game))
+      .on("postgres_changes", {
+        event: "INSERT",
+        schema: "public",
+        table: "games",
+        filter: `player2_id=eq.${me.id}`,
+      }, ({ new: g }) => handleGameFound(g as Game))
+      .subscribe();
+
+    // Вставляем себя в очередь
+    await supabase.from("matchmaking_queue").insert({ user_id: me.id });
+
+    // Ищем уже ожидающего игрока
+    const { data: queue } = await supabase
+      .from("matchmaking_queue")
+      .select("user_id")
+      .neq("user_id", me.id)
+      .order("created_at", { ascending: true })
+      .limit(1);
+
+    if (queue && queue.length > 0) {
+      const opponentId = queue[0].user_id;
+
+      // Используем RPC — security definer чистит очередь обоих игроков
+      const { data: newGameId, error } = await supabase.rpc("create_pvp_match", {
+        p1_id: opponentId,
+        p2_id: me.id,
+      });
+
+      if (!error && newGameId) {
+        const { data: newGame } = await supabase
+          .from("games").select("*").eq("id", newGameId).single();
+        if (newGame) handleGameFound(newGame as Game);
+      }
+    }
   };
 
-  const resolveGame = async (g: Game) => {
-    if (!profile || !g.player1_insult || !g.player2_insult) return;
+  const resolveGame = useCallback(async (g: Game) => {
+    const me = profileRef.current;
+    if (!me || !g.player1_insult || !g.player2_insult) return;
 
     const score1 = scoreInsult(g.player1_insult);
     const score2 = scoreInsult(g.player2_insult);
-    const winnerId = score1 > score2 ? g.player1_id : score2 > score1 ? g.player2_id : null;
+    const winnerId = score1 > score2 ? g.player1_id
+      : score2 > score1 ? g.player2_id
+      : null;
 
     await supabase.from("games").update({
       player1_score: score1,
@@ -148,66 +172,85 @@ export default function PvPPage() {
       status: "finished",
     }).eq("id", g.id);
 
-    // Update ratings
-    const isPlayer1 = profile.id === g.player1_id;
-    const myScore = isPlayer1 ? score1 : score2;
-    const theirScore = isPlayer1 ? score2 : score1;
-    const myId = profile.id;
-    const theirId = isPlayer1 ? g.player2_id! : g.player1_id;
+    const isP1 = me.id === g.player1_id;
+    const myScore = isP1 ? score1 : score2;
+    const theirScore = isP1 ? score2 : score1;
+    const theirId = isP1 ? g.player2_id! : g.player1_id;
 
     if (myScore > theirScore) {
       setRatingChange(WIN_POINTS);
-      await supabase.rpc("increment_rating", { uid: myId, delta: WIN_POINTS });
-      await supabase.rpc("increment_wins", { uid: myId });
+      await supabase.rpc("increment_rating", { uid: me.id, delta: WIN_POINTS });
+      await supabase.rpc("increment_wins", { uid: me.id });
       await supabase.rpc("increment_rating", { uid: theirId, delta: LOSS_POINTS });
       await supabase.rpc("increment_losses", { uid: theirId });
     } else if (theirScore > myScore) {
       setRatingChange(LOSS_POINTS);
-      await supabase.rpc("increment_rating", { uid: myId, delta: LOSS_POINTS });
-      await supabase.rpc("increment_losses", { uid: myId });
+      await supabase.rpc("increment_rating", { uid: me.id, delta: LOSS_POINTS });
+      await supabase.rpc("increment_losses", { uid: me.id });
       await supabase.rpc("increment_rating", { uid: theirId, delta: WIN_POINTS });
       await supabase.rpc("increment_wins", { uid: theirId });
     }
 
     setPhase("result");
-  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const submitInsult = useCallback(async (text?: string) => {
-    if (!game || !profile || submitted) return;
+    const g = gameRef.current;
+    const me = profileRef.current;
+    if (!g || !me || submittedRef.current) return;
+    submittedRef.current = true;
     setSubmitted(true);
     setTimerRunning(false);
-    const finalText = text ?? insult;
-    const field = profile.id === game.player1_id ? "player1_insult" : "player2_insult";
-    await supabase.from("games").update({ [field]: finalText || "" }).eq("id", game.id);
-  }, [game, profile, submitted, insult]);
 
-  const handleTimerExpire = useCallback(() => {
-    submitInsult("");
-  }, [submitInsult]);
+    const finalText = text ?? insultRef.current;
+    const field = me.id === g.player1_id ? "player1_insult" : "player2_insult";
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    submitInsult(insult);
-  };
+    const { data: updated } = await supabase
+      .from("games").update({ [field]: finalText || "" })
+      .eq("id", g.id).select().single();
+
+    if (updated) {
+      const ug = updated as Game;
+      setGame(ug);
+      gameRef.current = ug;
+      if (ug.player1_insult !== null && ug.player2_insult !== null) {
+        resolveGame(ug);
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolveGame]);
+
+  const handleTimerExpire = useCallback(() => submitInsult(""), [submitInsult]);
 
   const leaveQueue = async () => {
-    if (profile) await supabase.from("matchmaking_queue").delete().eq("user_id", profile.id);
-    matchmakingRef.current?.unsubscribe();
+    const me = profileRef.current;
+    if (me) await supabase.from("matchmaking_queue").delete().eq("user_id", me.id);
+    matchmakingChannelRef.current?.unsubscribe();
+    gameFoundRef.current = false;
     setPhase("lobby");
   };
 
+  const resetGame = () => {
+    gameFoundRef.current = false;
+    submittedRef.current = false;
+    setPhase("lobby");
+    setGame(null);
+    setOpponent(null);
+    setInsult("");
+    setSubmitted(false);
+    setRatingChange(0);
+    insultRef.current = "";
+  };
+
   const myScore = game && profile
-    ? (profile.id === game.player1_id ? game.player1_score : game.player2_score)
-    : null;
+    ? (profile.id === game.player1_id ? game.player1_score : game.player2_score) : null;
   const oppScore = game && profile
-    ? (profile.id === game.player1_id ? game.player2_score : game.player1_score)
-    : null;
+    ? (profile.id === game.player1_id ? game.player2_score : game.player1_score) : null;
   const myInsult = game && profile
-    ? (profile.id === game.player1_id ? game.player1_insult : game.player2_insult)
-    : null;
+    ? (profile.id === game.player1_id ? game.player1_insult : game.player2_insult) : null;
   const oppInsult = game && profile
-    ? (profile.id === game.player1_id ? game.player2_insult : game.player1_insult)
-    : null;
+    ? (profile.id === game.player1_id ? game.player2_insult : game.player1_insult) : null;
   const iWon = myScore !== null && oppScore !== null && myScore > oppScore;
   const isDraw = myScore !== null && oppScore !== null && myScore === oppScore;
 
@@ -228,8 +271,9 @@ export default function PvPPage() {
             <div className="text-6xl mb-4">⚔️</div>
             <h2 className="text-2xl font-bold text-white mb-2">PvP Битва</h2>
             <p className="text-slate-500 mb-6">
-              Мы найдём тебе соперника. У обоих будет <span className="text-orange-400 font-bold">60 секунд</span> написать оскорбление.
-              Кто наберёт больше очков Ебейшей Силы — тот победит!
+              Мы найдём тебе соперника. У обоих будет{" "}
+              <span className="text-orange-400 font-bold">60 секунд</span> написать оскорбление.
+              Кто наберёт больше очков Ебейшей Силы — победит!
             </p>
             <button
               onClick={joinMatchmaking}
@@ -247,8 +291,9 @@ export default function PvPPage() {
             <h2 className="text-xl font-bold text-white mb-2">Ищем соперника...</h2>
             <p className="text-slate-500 mb-6">Ожидаем пока кто-то примет вызов</p>
             <div className="flex gap-2 justify-center mb-6">
-              {[0,1,2].map(i => (
-                <div key={i} className="w-2 h-2 rounded-full bg-orange-500 animate-bounce" style={{ animationDelay: `${i * 0.2}s` }} />
+              {[0, 1, 2].map(i => (
+                <div key={i} className="w-2 h-2 rounded-full bg-orange-500 animate-bounce"
+                  style={{ animationDelay: `${i * 0.2}s` }} />
               ))}
             </div>
             <button onClick={leaveQueue} className="text-sm text-slate-600 hover:text-slate-400 transition-colors">
@@ -259,12 +304,11 @@ export default function PvPPage() {
 
         {phase === "fighting" && (
           <div className="space-y-4">
-            {/* Opponent info */}
             {opponent && (
               <div className="flex items-center justify-between rounded-xl border border-red-900/30 bg-red-950/10 p-3">
                 <span className="text-sm text-slate-400">Соперник:</span>
                 <span className="font-bold text-red-400">{opponent.username}</span>
-                <span className="text-xs text-slate-600">{submitted ? "Ожидаем его..." : "Пишет..."}</span>
+                <span className="text-xs text-slate-600">{submitted ? "Уже написал..." : "Пишет..."}</span>
               </div>
             )}
             <div className="rounded-xl border border-orange-500/30 bg-[#0f0f0f] p-6">
@@ -279,10 +323,10 @@ export default function PvPPage() {
                 </div>
                 <Timer seconds={60} onExpire={handleTimerExpire} running={timerRunning} />
               </div>
-              <form onSubmit={handleSubmit}>
+              <form onSubmit={(e) => { e.preventDefault(); submitInsult(insult); }}>
                 <textarea
                   value={insult}
-                  onChange={(e) => setInsult(e.target.value)}
+                  onChange={(e) => { setInsult(e.target.value); insultRef.current = e.target.value; }}
                   placeholder="Твоё оскорбление здесь..."
                   rows={4}
                   maxLength={500}
@@ -308,14 +352,18 @@ export default function PvPPage() {
         {phase === "result" && game && (
           <div className="space-y-4">
             <div className={`rounded-xl p-6 text-center border ${
-              iWon ? "border-green-500/30 bg-green-950/20" : isDraw ? "border-slate-500/30 bg-slate-900/20" : "border-red-500/30 bg-red-950/20"
+              iWon ? "border-green-500/30 bg-green-950/20"
+              : isDraw ? "border-slate-500/30 bg-slate-900/20"
+              : "border-red-500/30 bg-red-950/20"
             }`}>
               <div className="text-5xl mb-2">{iWon ? "🏆" : isDraw ? "🤝" : "💀"}</div>
-              <h2 className={`text-3xl font-impact mb-1 ${iWon ? "text-green-400" : isDraw ? "text-slate-400" : "text-red-400"}`}>
+              <h2 className={`text-3xl font-impact mb-1 ${
+                iWon ? "text-green-400" : isDraw ? "text-slate-400" : "text-red-400"
+              }`}>
                 {iWon ? "ПОБЕДА!" : isDraw ? "НИЧЬЯ!" : "ПОРАЖЕНИЕ!"}
               </h2>
               {ratingChange !== 0 && (
-                <div className={`text-xl font-bold ${ratingChange > 0 ? "text-green-400" : "text-red-400"}`}>
+                <div className={`text-xl font-bold mt-1 ${ratingChange > 0 ? "text-green-400" : "text-red-400"}`}>
                   {ratingChange > 0 ? "+" : ""}{ratingChange} ОР
                 </div>
               )}
@@ -324,34 +372,44 @@ export default function PvPPage() {
             <div className="grid grid-cols-2 gap-3">
               <div className="rounded-xl border border-[#1e1e1e] bg-[#0f0f0f] p-4">
                 <p className="text-xs text-slate-500 font-bold mb-1">Ты</p>
-                <p className="text-xs text-slate-500 italic mb-2 min-h-[36px]">&ldquo;{myInsult || "(не успел)"}&rdquo;</p>
+                <p className="text-xs text-slate-500 italic mb-2 min-h-[36px]">
+                  &ldquo;{myInsult || "(не успел)"}&rdquo;
+                </p>
                 <div className="flex items-center gap-2">
                   <div className="flex-1 h-1.5 rounded-full bg-[#1e1e1e] overflow-hidden">
                     <div className="h-full score-bar-fill" style={{ width: `${myScore ?? 0}%` }} />
                   </div>
-                  <span className={`font-impact text-lg ${iWon ? "text-orange-400" : "text-slate-400"}`}>{myScore ?? 0}</span>
+                  <span className={`font-impact text-lg ${iWon ? "text-orange-400" : "text-slate-400"}`}>
+                    {myScore ?? 0}
+                  </span>
                 </div>
               </div>
               <div className="rounded-xl border border-[#1e1e1e] bg-[#0f0f0f] p-4">
                 <p className="text-xs text-slate-500 font-bold mb-1">{opponent?.username ?? "Соперник"}</p>
-                <p className="text-xs text-slate-500 italic mb-2 min-h-[36px]">&ldquo;{oppInsult || "(не успел)"}&rdquo;</p>
+                <p className="text-xs text-slate-500 italic mb-2 min-h-[36px]">
+                  &ldquo;{oppInsult || "(не успел)"}&rdquo;
+                </p>
                 <div className="flex items-center gap-2">
                   <div className="flex-1 h-1.5 rounded-full bg-[#1e1e1e] overflow-hidden">
-                    <div className="h-full bg-gradient-to-r from-red-800 to-red-600" style={{ width: `${oppScore ?? 0}%` }} />
+                    <div className="h-full bg-gradient-to-r from-red-800 to-red-600"
+                      style={{ width: `${oppScore ?? 0}%` }} />
                   </div>
-                  <span className={`font-impact text-lg ${!iWon && !isDraw ? "text-orange-400" : "text-slate-400"}`}>{oppScore ?? 0}</span>
+                  <span className={`font-impact text-lg ${!iWon && !isDraw ? "text-orange-400" : "text-slate-400"}`}>
+                    {oppScore ?? 0}
+                  </span>
                 </div>
               </div>
             </div>
 
             <div className="flex gap-3">
               <button
-                onClick={() => { setPhase("lobby"); setGame(null); setInsult(""); setSubmitted(false); setRatingChange(0); }}
+                onClick={resetGame}
                 className="flex-1 py-3 rounded-xl bg-orange-600 hover:bg-orange-500 font-bold text-white transition-colors"
               >
                 Реванш! 🔥
               </button>
-              <Link href="/leaderboard" className="flex-1 py-3 rounded-xl border border-[#2e2e2e] hover:border-orange-500/50 text-slate-400 font-bold text-center transition-colors">
+              <Link href="/leaderboard"
+                className="flex-1 py-3 rounded-xl border border-[#2e2e2e] hover:border-orange-500/50 text-slate-400 font-bold text-center transition-colors">
                 Рейтинг
               </Link>
             </div>
