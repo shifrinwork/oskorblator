@@ -1,6 +1,6 @@
 "use client";
 export const dynamic = "force-dynamic";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase";
@@ -43,6 +43,9 @@ export default function ProfilePage() {
   const [newlyUnlocked, setNewlyUnlocked] = useState<string[]>([]);
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [avatarUploading, setAvatarUploading] = useState(false);
+  const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
   const supabase = createClient();
 
@@ -107,6 +110,43 @@ export default function ProfilePage() {
     setProfile(prev => prev ? { ...prev, active_frame: frameId } : prev);
   };
 
+  const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !profile) return;
+
+    // Показываем превью немедленно
+    const reader = new FileReader();
+    reader.onloadend = () => setAvatarPreview(reader.result as string);
+    reader.readAsDataURL(file);
+
+    setAvatarUploading(true);
+    try {
+      const ext = file.name.split(".").pop();
+      const path = `${profile.id}/avatar.${ext}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from("avatars")
+        .upload(path, file, { upsert: true });
+
+      if (uploadError) throw uploadError;
+
+      // Добавляем cache-buster чтобы браузер не держал старую картинку
+      const { data: urlData } = supabase.storage.from("avatars").getPublicUrl(path);
+      const freshUrl = `${urlData.publicUrl}?t=${Date.now()}`;
+
+      await supabase.from("profiles").update({ avatar_url: freshUrl }).eq("id", profile.id);
+      setProfile(prev => prev ? { ...prev, avatar_url: freshUrl } : prev);
+      setAvatarPreview(null); // сбрасываем превью — теперь используется avatar_url
+    } catch (err) {
+      console.error("Avatar upload error:", err);
+      setAvatarPreview(null); // откатываем превью
+    } finally {
+      setAvatarUploading(false);
+      // сбрасываем input чтобы можно было выбрать тот же файл повторно
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
   const copyReferral = async () => {
     if (!profile) return;
     const url = `${window.location.origin}/register?ref=${profile.referral_code}`;
@@ -155,12 +195,34 @@ export default function ProfilePage() {
         {/* Профиль */}
         <div className="rounded-xl border border-[#1e1e1e] bg-[#0f0f0f] p-6">
           <div className="flex flex-col sm:flex-row items-start sm:items-center gap-5">
-            <AvatarFrame
-              username={profile.username}
-              avatarUrl={profile.avatar_url}
-              frame={activeFrame}
-              size={80}
-            />
+            {/* Аватарка — кликабельная для замены фото */}
+            <div className="relative group flex-shrink-0">
+              <AvatarFrame
+                username={profile.username}
+                avatarUrl={avatarPreview ?? profile.avatar_url}
+                frame={activeFrame}
+                size={80}
+              />
+              {/* Hover-оверлей */}
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={avatarUploading}
+                className="absolute inset-0 rounded-full flex items-center justify-center bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity disabled:cursor-wait"
+                title="Сменить аватарку"
+              >
+                {avatarUploading
+                  ? <span className="text-xl animate-spin">⏳</span>
+                  : <span className="text-xl">📷</span>
+                }
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleAvatarChange}
+                className="hidden"
+              />
+            </div>
             <div className="flex-1">
               <h1 className="text-2xl font-bold text-white">{profile.username}</h1>
               <div className="flex items-center gap-2 mt-1">
