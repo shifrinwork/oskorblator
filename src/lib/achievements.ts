@@ -7,10 +7,13 @@ export type FrameStyle = {
   label: string;
   borderColor: string;
   glowColor: string;
-  glowSize: number;       // px
+  glowSize: number;
   animated: boolean;
-  gradient?: string[];    // для анимированного градиента
-  thickness: number;      // px
+  gradient?: string[];
+  thickness: number;
+  // canvas-pattern fields
+  pattern?: 'chain' | 'spikes' | 'thorns' | 'fire' | 'circuit' | 'snake';
+  patternDetail?: number; // 1–7
 };
 
 export type AchievementTier = {
@@ -41,61 +44,67 @@ export type UserStats = {
 
 // ── Фреймы ──────────────────────────────────────────────────
 
-const F = (
+const P = (
   id: string, label: string,
-  borderColor: string, glowColor: string,
-  glowSize: number, animated: boolean,
-  thickness = 2, gradient?: string[]
-): FrameStyle => ({ id, label, borderColor, glowColor, glowSize, animated, gradient, thickness });
+  pattern: FrameStyle["pattern"],
+  detail: number,
+  animated: boolean,
+): FrameStyle => ({
+  id, label, pattern, patternDetail: detail, animated,
+  borderColor: "#374151", glowColor: "transparent", glowSize: 0, thickness: 3,
+});
 
 export const FRAMES: Record<string, FrameStyle> = {
-  default:      F("default",      "Без рамки",          "#374151", "transparent", 0,  false, 2),
+  default: {
+    id: "default", label: "Без рамки", animated: false,
+    borderColor: "#374151", glowColor: "transparent", glowSize: 0, thickness: 2,
+  },
 
-  // Игры сыграны — серо-оранжевая гамма
-  games_1:      F("games_1",      "Дебютант",            "#c2410c", "#c2410c",    6,  false, 2),
-  games_2:      F("games_2",      "Задира",              "#ea580c", "#ea580c",    10, false, 2),
-  games_3:      F("games_3",      "Скандалист",          "#f97316", "#f97316",    14, false, 3),
-  games_4:      F("games_4",      "Завсегдатай Срача",   "#fb923c", "#f97316",    16, false, 3),
-  games_5:      F("games_5",      "Ветеран Оскорблений", "#fed7aa", "#f97316",    20, true,  3),
-  games_6:      F("games_6",      "Легенда Мата",        "#fbbf24", "#f97316",    24, true,  4, ["#fbbf24","#f97316","#dc2626"]),
-  games_7:      F("games_7",      "Богоизбранный Срачник","#ffffff","#fbbf24",    30, true,  4, ["#ffffff","#fbbf24","#f97316","#dc2626","#7c3aed"]),
+  // Игры сыграны — цепь (от ржавой железной до платиновой)
+  chain_1: P("chain_1", "Железная цепь",    "chain", 1, false),
+  chain_2: P("chain_2", "Ржавая цепь",      "chain", 2, false),
+  chain_3: P("chain_3", "Тёмная цепь",      "chain", 3, false),
+  chain_4: P("chain_4", "Бронзовая цепь",   "chain", 4, false),
+  chain_5: P("chain_5", "Серебряная цепь",  "chain", 5, false),
+  chain_6: P("chain_6", "Золотая цепь",     "chain", 6, true),
+  chain_7: P("chain_7", "Платиновая цепь",  "chain", 7, true),
 
-  // Очки — синяя гамма (холодный расчёт)
-  score_1:      F("score_1",      "Острый Язык",         "#3b82f6", "#3b82f6",    8,  false, 2),
-  score_2:      F("score_2",      "Мастер Слова",        "#6366f1", "#6366f1",    14, false, 3),
-  score_3:      F("score_3",      "Бог Матерщины",       "#a78bfa", "#8b5cf6",    22, true,  4, ["#a78bfa","#6366f1","#3b82f6","#06b6d4"]),
+  // Очки оскорбления — огонь (от оранжевого до хаотичного)
+  fire_1: P("fire_1", "Адский огонь",   "fire", 1, true),
+  fire_2: P("fire_2", "Синее пламя",    "fire", 2, true),
+  fire_3: P("fire_3", "Пламя хаоса",   "fire", 3, true),
 
-  // Стрик — зелёная гамма
-  streak_1:     F("streak_1",     "Постоянный",          "#16a34a", "#16a34a",    6,  false, 2),
-  streak_2:     F("streak_2",     "Недельный Бесёнок",   "#22c55e", "#22c55e",    10, false, 2),
-  streak_3:     F("streak_3",     "Две Недели Ада",      "#4ade80", "#22c55e",    14, false, 3),
-  streak_4:     F("streak_4",     "Месячный Монстр",     "#86efac", "#22c55e",    18, true,  3),
-  streak_5:     F("streak_5",     "Сезонный Демон",      "#bbf7d0", "#4ade80",    22, true,  4, ["#bbf7d0","#4ade80","#16a34a"]),
-  streak_6:     F("streak_6",     "Ежегодный Бог",       "#ffffff", "#4ade80",    28, true,  4, ["#ffffff","#bbf7d0","#4ade80","#16a34a","#15803d"]),
+  // Стрик — тернии (от зелёных до золотых)
+  thorns_1: P("thorns_1", "Зелёные тернии",  "thorns", 1, false),
+  thorns_2: P("thorns_2", "Тернии с кровью", "thorns", 2, false),
+  thorns_3: P("thorns_3", "Чёрные тернии",   "thorns", 3, false),
+  thorns_4: P("thorns_4", "Костяные тернии", "thorns", 4, false),
+  thorns_5: P("thorns_5", "Тернии тьмы",     "thorns", 5, false),
+  thorns_6: P("thorns_6", "Золотые тернии",  "thorns", 6, true),
 
-  // PvP победы — красная гамма
-  pvp_1:        F("pvp_1",        "Первая Кровь",        "#b91c1c", "#b91c1c",    8,  false, 2),
-  pvp_2:        F("pvp_2",        "Боец",                "#dc2626", "#dc2626",    12, false, 2),
-  pvp_3:        F("pvp_3",        "Душитель",            "#ef4444", "#dc2626",    16, false, 3),
-  pvp_4:        F("pvp_4",        "Мясник",              "#f87171", "#ef4444",    18, true,  3),
-  pvp_5:        F("pvp_5",        "Кровавый Рекордсмен", "#fca5a5", "#ef4444",    22, true,  3, ["#fca5a5","#ef4444","#b91c1c"]),
-  pvp_6:        F("pvp_6",        "Гладиатор Срача",     "#fecaca", "#ef4444",    26, true,  4, ["#fecaca","#fca5a5","#ef4444","#b91c1c"]),
-  pvp_7:        F("pvp_7",        "Непобедимый Ублюдок", "#ffffff", "#ef4444",    32, true,  4, ["#ffffff","#fca5a5","#ef4444","#7f1d1d"]),
+  // PvP победы — шипы (от стальных до алмазных)
+  spikes_1: P("spikes_1", "Стальные шипы",     "spikes", 1, false),
+  spikes_2: P("spikes_2", "Чёрные шипы",       "spikes", 2, false),
+  spikes_3: P("spikes_3", "Окровавленные",      "spikes", 3, false),
+  spikes_4: P("spikes_4", "Шипы с капелями",    "spikes", 4, false),
+  spikes_5: P("spikes_5", "Костяные шипы",      "spikes", 5, false),
+  spikes_6: P("spikes_6", "Кристальные шипы",   "spikes", 6, false),
+  spikes_7: P("spikes_7", "Призматические",     "spikes", 7, true),
 
-  // Бот победы — серая гамма
-  bot_1:        F("bot_1",        "Обидчик Машин",       "#4b5563", "#4b5563",    6,  false, 2),
-  bot_2:        F("bot_2",        "Терминатор Ботов",    "#6b7280", "#6b7280",    10, false, 2),
-  bot_3:        F("bot_3",        "Кибер-Злодей",        "#9ca3af", "#6b7280",    14, false, 3),
-  bot_4:        F("bot_4",        "Машинный Охотник",    "#d1d5db", "#9ca3af",    16, true,  3),
-  bot_5:        F("bot_5",        "Палач Алгоритмов",    "#e5e7eb", "#9ca3af",    20, true,  3, ["#e5e7eb","#9ca3af","#4b5563"]),
-  bot_6:        F("bot_6",        "Убийца Нейросетей",   "#f3f4f6", "#d1d5db",    24, true,  4, ["#f3f4f6","#d1d5db","#6b7280","#374151"]),
-  bot_7:        F("bot_7",        "Бог-Уничтожитель ИИ", "#ffffff", "#f3f4f6",    28, true,  4, ["#ffffff","#f3f4f6","#9ca3af","#374151","#111827"]),
+  // Победы над ботом — схемы (от серой до радужной)
+  circuit_1: P("circuit_1", "Схема I",          "circuit", 1, false),
+  circuit_2: P("circuit_2", "Схема II",         "circuit", 2, false),
+  circuit_3: P("circuit_3", "Схема III",        "circuit", 3, false),
+  circuit_4: P("circuit_4", "Схема IV",         "circuit", 4, true),
+  circuit_5: P("circuit_5", "Схема V",          "circuit", 5, true),
+  circuit_6: P("circuit_6", "Нейросеть",        "circuit", 6, true),
+  circuit_7: P("circuit_7", "Квантовая схема",  "circuit", 7, true),
 
-  // Рефералы — золотая особенная гамма
-  ref_1:        F("ref_1",        "Вербовщик",           "#d97706", "#d97706",    10, false, 2),
-  ref_2:        F("ref_2",        "Агент Срача",         "#f59e0b", "#f59e0b",    16, false, 3),
-  ref_3:        F("ref_3",        "Командир Скандала",   "#fbbf24", "#f59e0b",    20, true,  3, ["#fbbf24","#f59e0b","#d97706"]),
-  ref_4:        F("ref_4",        "Повелитель Орды",     "#ffffff", "#fbbf24",    32, true,  5, ["#ffffff","#fef3c7","#fbbf24","#f59e0b","#d97706","#92400e","#fbbf24"]),
+  // Рефералы — змея (от одной до гидры)
+  snake_1: P("snake_1", "Змея",    "snake", 1, false),
+  snake_2: P("snake_2", "Кобра",   "snake", 2, false),
+  snake_3: P("snake_3", "Анаконда","snake", 3, false),
+  snake_4: P("snake_4", "Гидра",   "snake", 4, true),
 };
 
 // ── Достижения ───────────────────────────────────────────────
@@ -109,13 +118,13 @@ export const ACHIEVEMENTS: Achievement[] = [
     category: "games",
     getProgress: (s) => s.total_games,
     tiers: [
-      { tier: 1, requirement: 1,    label: "Первый Шаг в Ад",      frame: FRAMES.games_1 },
-      { tier: 2, requirement: 5,    label: "Привыкает",             frame: FRAMES.games_2 },
-      { tier: 3, requirement: 20,   label: "Скандалист",            frame: FRAMES.games_3 },
-      { tier: 4, requirement: 50,   label: "Завсегдатай Срача",     frame: FRAMES.games_4 },
-      { tier: 5, requirement: 100,  label: "Ветеран Оскорблений",   frame: FRAMES.games_5 },
-      { tier: 6, requirement: 500,  label: "Легенда Мата",          frame: FRAMES.games_6 },
-      { tier: 7, requirement: 1000, label: "Богоизбранный Срачник", frame: FRAMES.games_7 },
+      { tier: 1, requirement: 1,    label: "Первый Шаг в Ад",       frame: FRAMES.chain_1 },
+      { tier: 2, requirement: 5,    label: "Привыкает",              frame: FRAMES.chain_2 },
+      { tier: 3, requirement: 20,   label: "Скандалист",             frame: FRAMES.chain_3 },
+      { tier: 4, requirement: 50,   label: "Завсегдатай Срача",      frame: FRAMES.chain_4 },
+      { tier: 5, requirement: 100,  label: "Ветеран Оскорблений",    frame: FRAMES.chain_5 },
+      { tier: 6, requirement: 500,  label: "Легенда Мата",           frame: FRAMES.chain_6 },
+      { tier: 7, requirement: 1000, label: "Богоизбранный Срачник",  frame: FRAMES.chain_7 },
     ],
   },
   {
@@ -126,9 +135,9 @@ export const ACHIEVEMENTS: Achievement[] = [
     category: "score",
     getProgress: (s) => s.max_insult_score,
     tiers: [
-      { tier: 1, requirement: 50,  label: "Острый Язык",     frame: FRAMES.score_1 },
-      { tier: 2, requirement: 75,  label: "Мастер Слова",    frame: FRAMES.score_2 },
-      { tier: 3, requirement: 100, label: "Бог Матерщины",   frame: FRAMES.score_3 },
+      { tier: 1, requirement: 50,  label: "Острый Язык",    frame: FRAMES.fire_1 },
+      { tier: 2, requirement: 75,  label: "Мастер Слова",   frame: FRAMES.fire_2 },
+      { tier: 3, requirement: 100, label: "Бог Матерщины",  frame: FRAMES.fire_3 },
     ],
   },
   {
@@ -139,12 +148,12 @@ export const ACHIEVEMENTS: Achievement[] = [
     category: "streak",
     getProgress: (s) => s.streak_days,
     tiers: [
-      { tier: 1, requirement: 2,   label: "Постоянный",          frame: FRAMES.streak_1 },
-      { tier: 2, requirement: 7,   label: "Недельный Бесёнок",   frame: FRAMES.streak_2 },
-      { tier: 3, requirement: 14,  label: "Две Недели Ада",      frame: FRAMES.streak_3 },
-      { tier: 4, requirement: 30,  label: "Месячный Монстр",     frame: FRAMES.streak_4 },
-      { tier: 5, requirement: 90,  label: "Сезонный Демон",      frame: FRAMES.streak_5 },
-      { tier: 6, requirement: 365, label: "Ежегодный Бог",       frame: FRAMES.streak_6 },
+      { tier: 1, requirement: 2,   label: "Постоянный",         frame: FRAMES.thorns_1 },
+      { tier: 2, requirement: 7,   label: "Недельный Бесёнок",  frame: FRAMES.thorns_2 },
+      { tier: 3, requirement: 14,  label: "Две Недели Ада",     frame: FRAMES.thorns_3 },
+      { tier: 4, requirement: 30,  label: "Месячный Монстр",    frame: FRAMES.thorns_4 },
+      { tier: 5, requirement: 90,  label: "Сезонный Демон",     frame: FRAMES.thorns_5 },
+      { tier: 6, requirement: 365, label: "Ежегодный Бог",      frame: FRAMES.thorns_6 },
     ],
   },
   {
@@ -155,13 +164,13 @@ export const ACHIEVEMENTS: Achievement[] = [
     category: "pvp",
     getProgress: (s) => s.pvp_wins,
     tiers: [
-      { tier: 1, requirement: 1,    label: "Первая Кровь",          frame: FRAMES.pvp_1 },
-      { tier: 2, requirement: 5,    label: "Боец",                  frame: FRAMES.pvp_2 },
-      { tier: 3, requirement: 20,   label: "Душитель",              frame: FRAMES.pvp_3 },
-      { tier: 4, requirement: 50,   label: "Мясник",                frame: FRAMES.pvp_4 },
-      { tier: 5, requirement: 100,  label: "Кровавый Рекордсмен",   frame: FRAMES.pvp_5 },
-      { tier: 6, requirement: 500,  label: "Гладиатор Срача",       frame: FRAMES.pvp_6 },
-      { tier: 7, requirement: 1000, label: "Непобедимый Ублюдок",   frame: FRAMES.pvp_7 },
+      { tier: 1, requirement: 1,    label: "Первая Кровь",         frame: FRAMES.spikes_1 },
+      { tier: 2, requirement: 5,    label: "Боец",                 frame: FRAMES.spikes_2 },
+      { tier: 3, requirement: 20,   label: "Душитель",             frame: FRAMES.spikes_3 },
+      { tier: 4, requirement: 50,   label: "Мясник",               frame: FRAMES.spikes_4 },
+      { tier: 5, requirement: 100,  label: "Кровавый Рекордсмен",  frame: FRAMES.spikes_5 },
+      { tier: 6, requirement: 500,  label: "Гладиатор Срача",      frame: FRAMES.spikes_6 },
+      { tier: 7, requirement: 1000, label: "Непобедимый Ублюдок",  frame: FRAMES.spikes_7 },
     ],
   },
   {
@@ -172,13 +181,13 @@ export const ACHIEVEMENTS: Achievement[] = [
     category: "bot",
     getProgress: (s) => s.bot_wins,
     tiers: [
-      { tier: 1, requirement: 1,    label: "Обидчик Машин",        frame: FRAMES.bot_1 },
-      { tier: 2, requirement: 5,    label: "Терминатор Ботов",     frame: FRAMES.bot_2 },
-      { tier: 3, requirement: 20,   label: "Кибер-Злодей",         frame: FRAMES.bot_3 },
-      { tier: 4, requirement: 50,   label: "Машинный Охотник",     frame: FRAMES.bot_4 },
-      { tier: 5, requirement: 100,  label: "Палач Алгоритмов",     frame: FRAMES.bot_5 },
-      { tier: 6, requirement: 500,  label: "Убийца Нейросетей",    frame: FRAMES.bot_6 },
-      { tier: 7, requirement: 1000, label: "Бог-Уничтожитель ИИ",  frame: FRAMES.bot_7 },
+      { tier: 1, requirement: 1,    label: "Обидчик Машин",       frame: FRAMES.circuit_1 },
+      { tier: 2, requirement: 5,    label: "Терминатор Ботов",    frame: FRAMES.circuit_2 },
+      { tier: 3, requirement: 20,   label: "Кибер-Злодей",        frame: FRAMES.circuit_3 },
+      { tier: 4, requirement: 50,   label: "Машинный Охотник",    frame: FRAMES.circuit_4 },
+      { tier: 5, requirement: 100,  label: "Палач Алгоритмов",    frame: FRAMES.circuit_5 },
+      { tier: 6, requirement: 500,  label: "Убийца Нейросетей",   frame: FRAMES.circuit_6 },
+      { tier: 7, requirement: 1000, label: "Бог-Уничтожитель ИИ", frame: FRAMES.circuit_7 },
     ],
   },
   {
@@ -189,10 +198,10 @@ export const ACHIEVEMENTS: Achievement[] = [
     category: "referral",
     getProgress: (s) => s.referral_count,
     tiers: [
-      { tier: 1, requirement: 1,  label: "Вербовщик",           frame: FRAMES.ref_1 },
-      { tier: 2, requirement: 5,  label: "Агент Срача",         frame: FRAMES.ref_2 },
-      { tier: 3, requirement: 10, label: "Командир Скандала",   frame: FRAMES.ref_3 },
-      { tier: 4, requirement: 30, label: "Повелитель Орды",     frame: FRAMES.ref_4 },
+      { tier: 1, requirement: 1,  label: "Вербовщик",         frame: FRAMES.snake_1 },
+      { tier: 2, requirement: 5,  label: "Агент Срача",       frame: FRAMES.snake_2 },
+      { tier: 3, requirement: 10, label: "Командир Скандала", frame: FRAMES.snake_3 },
+      { tier: 4, requirement: 30, label: "Повелитель Орды",   frame: FRAMES.snake_4 },
     ],
   },
 ];
@@ -212,14 +221,16 @@ export function getNextTier(achievement: Achievement, currentTier: number): Achi
 }
 
 export function getBestFrame(unlockedAchievements: { achievement_id: string; current_tier: number }[]): FrameStyle {
-  // Приоритет: ref_4 > games_7 > pvp_7 > streak_6 > score_3 > ...
-  const priority = ["ref_4","games_7","pvp_7","bot_7","streak_6","score_3",
-    "ref_3","games_6","pvp_6","bot_6","streak_5","score_2",
-    "ref_2","games_5","pvp_5","bot_5","streak_4","score_1",
-    "ref_1","games_4","pvp_4","bot_4","streak_3",
-    "games_3","pvp_3","bot_3","streak_2",
-    "games_2","pvp_2","bot_2","streak_1",
-    "games_1","pvp_1","bot_1",
+  // Приоритет: гидра > платина/призма/квант > золото/кристаллы > ...
+  const priority = [
+    "snake_4",
+    "chain_7","spikes_7","circuit_7",
+    "chain_6","spikes_6","circuit_6","thorns_6","fire_3","snake_3",
+    "chain_5","spikes_5","circuit_5","thorns_5","fire_2","snake_2",
+    "chain_4","spikes_4","circuit_4","thorns_4","fire_1","snake_1",
+    "chain_3","spikes_3","circuit_3","thorns_3",
+    "chain_2","spikes_2","circuit_2","thorns_2",
+    "chain_1","spikes_1","circuit_1","thorns_1",
   ];
 
   const unlocked = new Set<string>();
