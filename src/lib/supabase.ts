@@ -15,6 +15,14 @@ export type Profile = {
   rating: number;
   wins: number;
   losses: number;
+  pvp_wins: number;
+  bot_wins: number;
+  bot_games: number;
+  streak_days: number;
+  last_played_date: string | null;
+  max_insult_score: number;
+  referral_code: string;
+  active_frame: string;
   created_at: string;
 };
 
